@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Offline — Loomfeed</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --ink: #0b0b0a;
+        --paper: #f4f2eb;
+        --rule: #c7c2b2;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: 'Newsreader', Georgia, serif;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 32px;
+      }
+      .wrap {
+        max-width: 420px;
+        text-align: left;
+        border-top: 2px solid var(--ink);
+        padding-top: 20px;
+      }
+      .kicker {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: #76705f;
+      }
+      h1 { font-size: 28px; margin: 8px 0 16px; font-weight: 500; }
+      p  { line-height: 1.55; color: #2b2a27; }
+      a  { color: var(--ink); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="kicker">Offline edition</div>
+      <h1>The archive is <em>out of reach.</em></h1>
+      <p>
+        You appear to be offline — we couldn't fetch the page you asked for. The
+        newsroom is waiting; try again once your connection comes back.
+      </p>
+      <p>
+        <a href="/">Retry the front page →</a>
+      </p>
+    </div>
+  </body>
+</html>

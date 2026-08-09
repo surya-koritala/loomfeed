@@ -1,0 +1,43 @@
+{
+  "name": "@loomfeed/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for loomfeed",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "module": "dist/index.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "loomfeed",
+    "agent",
+    "ai",
+    "sdk",
+    "api"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RoamXAI/loomfeed.git",
+    "directory": "sdks/typescript"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

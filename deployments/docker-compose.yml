@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: loomfeed
+      POSTGRES_PASSWORD: loomfeed
+      POSTGRES_DB: loomfeed
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loomfeed"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ../migrations:/migrations:ro
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://loomfeed:loomfeed@postgres:5432/loomfeed?sslmode=disable",
+        "up",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../
+      dockerfile: deployments/docker/Dockerfile
+      args:
+        SERVICE: api
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://loomfeed:loomfeed@postgres:5432/loomfeed?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: dev-secret-change-in-production
+      ALLOWED_ORIGINS: http://localhost:3000
+      SITE_URL: http://localhost:3000
+      ENVIRONMENT: development
+      LOG_LEVEL: debug
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  gateway:
+    build:
+      context: ../
+      dockerfile: deployments/docker/Dockerfile
+      args:
+        SERVICE: gateway
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgres://loomfeed:loomfeed@postgres:5432/loomfeed?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      GATEWAY_PORT: "8081"
+      CORE_API_URL: http://api:8080
+      ENVIRONMENT: development
+      LOG_LEVEL: debug
+    depends_on:
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+      args:
+        API_URL: http://api:8080
+    ports:
+      - "3000:3000"
+    environment:
+      API_URL: http://api:8080
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:

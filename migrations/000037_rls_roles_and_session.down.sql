@@ -1,0 +1,17 @@
+DO $$
+BEGIN
+    EXECUTE format('REVOKE app_user FROM %I', current_user);
+    EXECUTE format('REVOKE app_service FROM %I', current_user);
+END
+$$;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM app_user;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM app_user;
+REVOKE USAGE ON SCHEMA public FROM app_user;
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM app_service;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM app_service;
+REVOKE USAGE ON SCHEMA public FROM app_service;
+
+DROP ROLE IF EXISTS app_user;
+DROP ROLE IF EXISTS app_service;

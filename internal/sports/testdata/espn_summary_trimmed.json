@@ -1,0 +1,33 @@
+{
+  "commentary": [
+    {"sequence": 0, "time": {"displayValue": ""}, "text": "Lineups are announced and players are warming up."},
+    {"sequence": 2, "time": {"displayValue": "1'"}, "text": "First Half begins.", "play": {"type": {"type": "start-half"}}},
+    {"sequence": 5, "time": {"displayValue": "6'"}, "text": "Foul by Teboho Mokoena (South Africa).", "play": {"type": {"type": "foul"}}},
+    {"sequence": 7, "time": {"displayValue": "9'"}, "text": "Goal! Mexico 1, South Africa 0. Julián Quiñones (Mexico) right footed shot from the centre of the box.", "play": {"type": {"type": "goal"}}},
+    {"sequence": 12, "time": {"displayValue": "17'"}, "text": "Teboho Mokoena (South Africa) is shown the yellow card for a bad foul.", "play": {"type": {"type": "yellow-card"}}},
+    {"sequence": 44, "time": {"displayValue": "45'+4'"}, "text": "First Half ends, Mexico 1, South Africa 0.", "play": {"type": {"type": "halftime"}}},
+    {"sequence": 50, "time": {"displayValue": "49'"}, "text": "Yaya Sithole (South Africa) is shown the red card.", "play": {"type": {"type": "red-card"}}},
+    {"sequence": 55, "time": {"displayValue": "55'"}, "text": "Substitution, South Africa. Themba Zwane replaces Patrick Maswanganyi.", "play": {"type": {"type": "substitution"}}},
+    {"sequence": 66, "time": {"displayValue": "67'"}, "text": "Goal! Mexico 2, South Africa 0. Raúl Jiménez (Mexico) header from very close range.", "play": {"type": {"type": "goal---header"}}},
+    {"sequence": 100, "time": {"displayValue": "90'+5'"}, "text": "Second Half ends, Mexico 2, South Africa 0."},
+    {"sequence": 101, "time": {"displayValue": "90'+5'"}, "text": "Match ends, Mexico 2, South Africa 0."}
+  ],
+  "rosters": [
+    {
+      "homeAway": "home", "formation": "4-2-3-1",
+      "team": {"displayName": "Mexico", "abbreviation": "MEX"},
+      "roster": [
+        {"starter": true, "jersey": "1", "formationPlace": "1", "position": {"abbreviation": "G"}, "athlete": {"displayName": "Raúl Rangel"}},
+        {"starter": false, "jersey": "9", "position": {"abbreviation": "F"}, "athlete": {"displayName": "Raúl Jiménez"}}
+      ]
+    },
+    {
+      "homeAway": "away", "formation": "4-3-3",
+      "team": {"displayName": "South Africa", "abbreviation": "RSA"},
+      "roster": [
+        {"starter": true, "jersey": "1", "formationPlace": "1", "position": {"abbreviation": "G"}, "athlete": {"displayName": "Ronwen Williams"}},
+        {"starter": false, "jersey": "10", "position": {"abbreviation": "M"}, "athlete": {"displayName": "Themba Zwane"}}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+-- 'article' is a distinct post type for the /read magazine surface
+-- — long-form essays and research that opt in at submit time. The
+-- prior /read implementation filtered text+synthesis by body length,
+-- which pulled in existing discussion posts that happened to be long.
+-- This split makes /read a deliberate publication, not a length
+-- bucket: only posts the author marked as articles appear there.
+--
+-- ENUM additions are transactional in PostgreSQL 12+, so a plain
+-- ALTER TYPE … ADD VALUE is safe to run as a single statement. The
+-- IF NOT EXISTS guard makes this re-runnable.
+ALTER TYPE post_type ADD VALUE IF NOT EXISTS 'article';

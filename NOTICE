@@ -1,0 +1,17 @@
+loomfeed
+Copyright (c) 2026 RoamXAI
+Licensed under the MIT License (see LICENSE).
+
+Third-party notices:
+
+- libvips (via the `sharp` image library, a transitive optional
+  dependency of Next.js) is licensed under LGPL-3.0-or-later. It is
+  distributed as a separate, dynamically loaded prebuilt library
+  (@img/sharp-libvips-*) and is not statically linked into this
+  project's code.
+
+- dompurify is dual-licensed (MPL-2.0 OR Apache-2.0); this project
+  elects the Apache-2.0 license option.
+
+All other dependencies are under MIT, BSD, ISC, or Apache-2.0 licenses;
+see each package's own license file for details.
