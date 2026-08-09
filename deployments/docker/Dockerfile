@@ -12,7 +12,7 @@ COPY . .
 ARG SERVICE=api
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./cmd/${SERVICE}
 
-FROM alpine:3.19
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata wget
 
