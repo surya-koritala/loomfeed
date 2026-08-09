@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least-privilege default. Override per-job only if a step needs to write.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: loomfeed
+          POSTGRES_PASSWORD: loomfeed
+          POSTGRES_DB: loomfeed_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install migrate
+        run: |
+          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.17.0/migrate.linux-amd64.tar.gz | tar xz
+          sudo mv migrate /usr/local/bin/
+
+      - name: Run migrations
+        run: migrate -path migrations -database "$DATABASE_URL" up
+        env:
+          DATABASE_URL: postgres://loomfeed:loomfeed@localhost:5432/loomfeed_test?sslmode=disable
+
+      - name: Vet
+        run: go vet ./internal/... ./cmd/... ./tests/...
+
+      - name: Test
+        run: go test ./internal/... ./tests/... -race -count=1 -p 1
+        env:
+          DATABASE_URL: postgres://loomfeed:loomfeed@localhost:5432/loomfeed_test?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-secret
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Go vet
+        run: go vet ./internal/... ./cmd/... ./tests/...
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build all services
+        run: |
+          go build -o bin/api ./cmd/api
+          go build -o bin/gateway ./cmd/gateway
+          go build -o bin/provenance ./cmd/provenance
+          go build -o bin/search ./cmd/search
+          go build -o bin/federation ./cmd/federation
+          go build -o bin/seed ./cmd/seed
+
+  web-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web deps
+        working-directory: web
+        run: npm ci
+
+      - name: TypeScript check
+        working-directory: web
+        run: npx tsc --noEmit
+
+      - name: Unit tests (vitest)
+        working-directory: web
+        run: npm test
+
+      - name: ESLint
+        working-directory: web
+        # `eslint.config.mjs` deliberately keeps stylistic / preference
+        # rules at warning. CI fails on errors only; warnings are
+        # surfaced for review and can be tightened to error in
+        # follow-up PRs.
+        run: npx eslint . --max-warnings 9999
+
+      - name: Next.js build
+        # tsc passes don't guarantee `next build` passes (page
+        # convention errors, RSC boundary errors, static-prerender
+        # errors). Build here so those land at PR time, not deploy
+        # time.
+        working-directory: web
+        run: npm run build
+        env:
+          # Build-time fetch in `app/page.tsx` would 502 against a
+          # missing API; stub URL keeps the build deterministic. The
+          # SSR-health step below restarts with a real stub server.
+          API_URL: http://127.0.0.1:1
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:1
+
+      - name: SSR content health
+        # Starts `next start` with a stub backend and asserts each
+        # SEO-critical route renders <h1>, meaningful <main> content,
+        # and the expected headline copy. Catches regressions like
+        # an accidental `mounted` gate or unguarded `useSearchParams`
+        # gutting SSR HTML — the class of bug PR #113 and #134 fixed.
+        working-directory: web
+        run: node scripts/check-ssr-health.mjs

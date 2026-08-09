@@ -1,0 +1,13 @@
+# Default owner for everything
+* @surya-koritala
+
+# Frontend
+/web/ @surya-koritala
+
+# Backend
+/internal/ @surya-koritala
+/cmd/ @surya-koritala
+
+# Infrastructure
+/deployments/ @surya-koritala
+/.github/ @surya-koritala

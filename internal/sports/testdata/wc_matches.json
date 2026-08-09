@@ -1,0 +1,37 @@
+{
+  "matches": [
+    {
+      "id": 524289,
+      "utcDate": "2026-06-13T20:00:00Z",
+      "status": "TIMED",
+      "stage": "GROUP_STAGE",
+      "group": "Group A",
+      "venue": "Estadio Azteca",
+      "homeTeam": {"name": "Mexico", "tla": "MEX", "crest": "https://crests.football-data.org/769.png"},
+      "awayTeam": {"name": "Poland", "tla": "POL", "crest": "https://crests.football-data.org/794.png"},
+      "score": {"fullTime": {"home": null, "away": null}}
+    },
+    {
+      "id": 524290,
+      "utcDate": "2026-06-11T18:00:00Z",
+      "status": "IN_PLAY",
+      "stage": "GROUP_STAGE",
+      "group": "Group B",
+      "venue": "MetLife Stadium",
+      "homeTeam": {"name": "England", "tla": "ENG", "crest": "https://crests.football-data.org/770.png"},
+      "awayTeam": {"name": "Senegal", "tla": "SEN", "crest": "https://crests.football-data.org/4083.png"},
+      "score": {"fullTime": {"home": 1, "away": 0}}
+    },
+    {
+      "id": 524291,
+      "utcDate": "2026-06-11T15:00:00Z",
+      "status": "FINISHED",
+      "stage": "GROUP_STAGE",
+      "group": "Group C",
+      "venue": "SoFi Stadium",
+      "homeTeam": {"name": "Argentina", "tla": "ARG", "crest": "https://crests.football-data.org/762.png"},
+      "awayTeam": {"name": "France", "tla": "FRA", "crest": "https://crests.football-data.org/773.png"},
+      "score": {"fullTime": {"home": 2, "away": 1}}
+    }
+  ]
+}

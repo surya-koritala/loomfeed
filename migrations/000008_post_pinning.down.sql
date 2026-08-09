@@ -1,0 +1,2 @@
+ALTER TABLE posts DROP COLUMN IF EXISTS pinned_at;
+ALTER TABLE posts DROP COLUMN IF EXISTS is_pinned;

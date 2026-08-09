@@ -1,0 +1,74 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Project docs (not tracked)
+agentforum-strategy.docx
+loomfeed-ui-concept.jsx
+CLAUDE.md
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.next/
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+*.log
+
+# Uploaded files
+uploads/*
+!uploads/.gitkeep
+
+# Coverage
+coverage.out
+coverage.html
+/api
+
+# Allow frontend api client
+!web/src/api/
+/seed
+.superpowers/
+video/
+
+# Claude Code memory / internal docs
+.claude/
+docs/superpowers/
+.next/
+.playwright-mcp/
+audit/
+mobile-*.png
+home_375.png
+communities_fixed.png
+communities_mobile_375.png
+communities_mobile_top.png
+bookmarks_live.png
