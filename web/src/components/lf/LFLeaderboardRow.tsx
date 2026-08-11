@@ -5,6 +5,7 @@ import React from 'react'
 import Link from 'next/link'
 import { LFAvatar } from './LFAvatar'
 import { LFTrustChip } from './LFTrustChip'
+import { agentScorecardHref } from '../../lib/agent-links'
 
 // Single row in a leaderboard. Rank badge + avatar + name + meta
 // line (model · post count) + trust on the right. Whole row is a
@@ -40,18 +41,26 @@ export function LFLeaderboardRow({
   isOnline,
 }: LFLeaderboardRowProps) {
   return (
-    <Link
-      href={`/profile/${participantId}`}
+    <div
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 14,
-        padding: '14px 18px',
-        textDecoration: 'none',
-        color: 'var(--lf-ink)',
         borderBottom: '1px solid var(--lf-rule-soft)',
       }}
     >
+      <Link
+        href={`/profile/${participantId}`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
+          padding: '14px 18px',
+          textDecoration: 'none',
+          color: 'var(--lf-ink)',
+          flex: 1,
+          minWidth: 0,
+        }}
+      >
       <div
         aria-hidden
         style={{
@@ -131,7 +140,31 @@ export function LFLeaderboardRow({
           </div>
         )}
       </div>
-      <LFTrustChip score={trustScore} />
-    </Link>
+        <LFTrustChip score={trustScore} />
+      </Link>
+      {isAgent && (
+        <Link
+          href={agentScorecardHref(participantId)}
+          aria-label={`View ${displayName}'s scorecard`}
+          style={{
+            alignSelf: 'center',
+            flexShrink: 0,
+            marginRight: 18,
+            padding: '6px 9px',
+            border: '1px solid var(--lf-rule-mid)',
+            borderRadius: 999,
+            color: 'var(--lf-ink)',
+            fontFamily: 'var(--lf-font-mono)',
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: '0.04em',
+            textDecoration: 'none',
+            textTransform: 'uppercase',
+          }}
+        >
+          Scorecard
+        </Link>
+      )}
+    </div>
   )
 }

@@ -27,8 +27,8 @@ var epistemicPriority = map[string]int{
 // EpistemicResult holds vote counts and the winning epistemic status for a post.
 type EpistemicResult struct {
 	PostID     string         `json:"post_id"`
-	Status     string         `json:"status"`       // winning status (most votes)
-	Counts     map[string]int `json:"counts"`        // {hypothesis: 3, supported: 7, contested: 2}
+	Status     string         `json:"status"` // winning status (most votes)
+	Counts     map[string]int `json:"counts"` // {hypothesis: 3, supported: 7, contested: 2}
 	TotalVotes int            `json:"total_votes"`
 	UserVote   string         `json:"user_vote,omitempty"` // current user's vote
 }
@@ -61,8 +61,9 @@ func IsValidStatus(status string) bool {
 // /refuted), a reputation event is fired for the post author. We only
 // fire on the first transition to prevent oscillation abuse — once a
 // post has been judged by humans, further re-votes don't keep paying
-// out (or punishing) the author. Correction-driven recovery is handled
-// by separate correction_acknowledged events.
+// out (or punishing) the author. The first time contested wins is retained
+// separately so the scorecard can distinguish acknowledged corrections from
+// warranted-but-ignored ones even if later votes change the winning status.
 func (r *EpistemicRepo) Vote(ctx context.Context, postID, voterID, status string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -98,7 +99,15 @@ func (r *EpistemicRepo) Vote(ctx context.Context, postID, voterID, status string
 		return fmt.Errorf("recalculate winner: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, `UPDATE posts SET epistemic_status = $1 WHERE id = $2`,
+	_, err = tx.Exec(ctx, `
+		UPDATE posts
+		SET epistemic_status = $1::varchar,
+		    first_contested_at = CASE
+		        WHEN $1::varchar = 'contested' THEN COALESCE(first_contested_at, NOW())
+		        ELSE first_contested_at
+		    END,
+		    updated_at = NOW()
+		WHERE id = $2`,
 		winningStatus, postID,
 	)
 	if err != nil {

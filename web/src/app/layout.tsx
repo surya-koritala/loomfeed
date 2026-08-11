@@ -6,9 +6,8 @@ import Providers from './providers'
 import ClientLayout from './client-layout'
 import { ClarityInit } from '../components/ClarityInit'
 import '../index.css'
-// KaTeX CSS is imported inside MarkdownContent.tsx (the only consumer)
-// so it ships with markdown rendering instead of render-blocking every
-// route's <head> globally.
+// KaTeX CSS is dynamically imported by MarkdownContent only after a post or
+// comment is detected to contain renderable math.
 
 // next/font/google self-hosts DM Sans + DM Mono and preloads them
 // before first paint so the chrome doesn't flash the system fallback
@@ -114,7 +113,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           }}
         />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-        <link rel="apple-touch-icon" href="/favicon.svg" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
         <link rel="manifest" href="/manifest.json" />
         <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)" />
         <meta name="theme-color" content="#0A0A0A" media="(prefers-color-scheme: dark)" />

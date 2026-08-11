@@ -4,31 +4,86 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net"
 	"net/http"
+	"net/mail"
+	"net/smtp"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/surya-koritala/loomfeed/internal/config"
 )
 
-// Sender sends emails via Azure Communication Services.
+type deliveryBackend interface {
+	Send(to, toName, subject, htmlBody, plainText string) error
+}
+
+// Sender exposes one email interface over the configured delivery backend.
 type Sender struct {
+	backend deliveryBackend
+}
+
+type acsBackend struct {
 	endpoint string
 	key      []byte
 	from     string
 }
 
+type smtpBackend struct {
+	host     string
+	port     string
+	username string
+	password string
+	from     string
+}
+
 // NewSender creates a sender from an ACS connection string.
+// Kept for compatibility with callers that explicitly construct ACS.
 func NewSender(connStr string, fromDomain string) *Sender {
 	endpoint, keyStr := parseConnectionString(connStr)
 	keyBytes, _ := base64.StdEncoding.DecodeString(keyStr)
 	from := "DoNotReply@" + fromDomain
 	slog.Info("email sender configured", "endpoint", endpoint, "from", from)
-	return &Sender{endpoint: endpoint, key: keyBytes, from: from}
+	return &Sender{backend: &acsBackend{endpoint: endpoint, key: keyBytes, from: from}}
+}
+
+// NewSMTPSender creates a sender for standard SMTP. The transport upgrades
+// with STARTTLS whenever the server advertises it and supports optional PLAIN
+// authentication through SMTP_USERNAME/SMTP_PASSWORD.
+func NewSMTPSender(host, port, username, password, from string) *Sender {
+	slog.Info("SMTP email sender configured", "host", host, "port", port, "from", from)
+	return &Sender{backend: &smtpBackend{
+		host: host, port: port, username: username, password: password, from: from,
+	}}
+}
+
+// NewConfiguredSender selects SMTP when SMTP_HOST is configured, otherwise
+// preserving the existing ACS backend. A nil result means email is disabled.
+func NewConfiguredSender(cfg config.EmailConfig) *Sender {
+	if cfg.SMTPHost != "" {
+		return NewSMTPSender(
+			cfg.SMTPHost,
+			cfg.SMTPPort,
+			cfg.SMTPUsername,
+			cfg.SMTPPassword,
+			cfg.SMTPFrom,
+		)
+	}
+	if cfg.ACSConnectionString != "" {
+		return NewSender(cfg.ACSConnectionString, cfg.ACSEmailDomain)
+	}
+	return nil
 }
 
 func parseConnectionString(connStr string) (string, string) {
@@ -66,8 +121,16 @@ type emailAddress struct {
 	DisplayName string `json:"displayName,omitempty"`
 }
 
-// Send sends an email via ACS with HMAC-SHA256 auth.
+// Send delegates to the configured backend.
 func (s *Sender) Send(to, toName, subject, htmlBody, plainText string) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("email sender is not configured")
+	}
+	return s.backend.Send(to, toName, subject, htmlBody, plainText)
+}
+
+// Send sends an email via ACS with HMAC-SHA256 auth.
+func (s *acsBackend) Send(to, toName, subject, htmlBody, plainText string) error {
 	if s.endpoint == "" || len(s.key) == 0 {
 		slog.Warn("email: skipping send, no ACS credentials")
 		return nil
@@ -132,6 +195,123 @@ func (s *Sender) Send(to, toName, subject, htmlBody, plainText string) error {
 
 	slog.Info("email sent successfully", "to", to, "subject", subject, "status", resp.StatusCode)
 	return nil
+}
+
+// Send submits a multipart plain-text + HTML message over SMTP.
+func (s *smtpBackend) Send(to, toName, subject, htmlBody, plainText string) error {
+	if s.host == "" || s.port == "" || s.from == "" {
+		return fmt.Errorf("SMTP sender is incomplete")
+	}
+	if strings.ContainsAny(subject+toName, "\r\n") {
+		return fmt.Errorf("email headers must not contain line breaks")
+	}
+
+	fromAddress, err := mail.ParseAddress(s.from)
+	if err != nil {
+		return fmt.Errorf("parse SMTP_FROM: %w", err)
+	}
+	toAddress, err := mail.ParseAddress(to)
+	if err != nil {
+		return fmt.Errorf("parse recipient: %w", err)
+	}
+	if toName != "" {
+		toAddress.Name = toName
+	}
+
+	message, err := buildSMTPMessage(*fromAddress, *toAddress, subject, plainText, htmlBody)
+	if err != nil {
+		return err
+	}
+
+	serverAddress := net.JoinHostPort(s.host, s.port)
+	conn, err := net.DialTimeout("tcp", serverAddress, 15*time.Second)
+	if err != nil {
+		return fmt.Errorf("connect SMTP server: %w", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	client, err := smtp.NewClient(conn, s.host)
+	if err != nil {
+		return fmt.Errorf("start SMTP client: %w", err)
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: s.host, MinVersion: tls.VersionTLS12}); err != nil {
+			return fmt.Errorf("start SMTP TLS: %w", err)
+		}
+	}
+	if s.username != "" {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("SMTP server does not advertise authentication")
+		}
+		auth := smtp.PlainAuth("", s.username, s.password, s.host)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("authenticate SMTP: %w", err)
+		}
+	}
+	if err := client.Mail(fromAddress.Address); err != nil {
+		return fmt.Errorf("set SMTP sender: %w", err)
+	}
+	if err := client.Rcpt(toAddress.Address); err != nil {
+		return fmt.Errorf("set SMTP recipient: %w", err)
+	}
+	body, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("begin SMTP message: %w", err)
+	}
+	if _, err := body.Write(message); err != nil {
+		_ = body.Close()
+		return fmt.Errorf("write SMTP message: %w", err)
+	}
+	if err := body.Close(); err != nil {
+		return fmt.Errorf("finish SMTP message: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("quit SMTP session: %w", err)
+	}
+
+	slog.Info("email sent successfully", "provider", "smtp", "to", toAddress.Address, "subject", subject)
+	return nil
+}
+
+func buildSMTPMessage(from, to mail.Address, subject, plainText, htmlBody string) ([]byte, error) {
+	var body bytes.Buffer
+	boundary := multipart.NewWriter(&body)
+
+	_, _ = fmt.Fprintf(&body, "From: %s\r\n", from.String())
+	_, _ = fmt.Fprintf(&body, "To: %s\r\n", to.String())
+	_, _ = fmt.Fprintf(&body, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
+	_, _ = fmt.Fprint(&body, "MIME-Version: 1.0\r\n")
+	_, _ = fmt.Fprintf(&body, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary.Boundary())
+
+	writePart := func(contentType, content string) error {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Type", contentType+`; charset="UTF-8"`)
+		header.Set("Content-Transfer-Encoding", "quoted-printable")
+		part, err := boundary.CreatePart(header)
+		if err != nil {
+			return err
+		}
+		encoded := quotedprintable.NewWriter(part)
+		if _, err := encoded.Write([]byte(content)); err != nil {
+			_ = encoded.Close()
+			return err
+		}
+		return encoded.Close()
+	}
+
+	if err := writePart("text/plain", plainText); err != nil {
+		return nil, fmt.Errorf("encode SMTP plain-text body: %w", err)
+	}
+	if err := writePart("text/html", htmlBody); err != nil {
+		return nil, fmt.Errorf("encode SMTP HTML body: %w", err)
+	}
+	if err := boundary.Close(); err != nil {
+		return nil, fmt.Errorf("finish SMTP MIME body: %w", err)
+	}
+	return body.Bytes(), nil
 }
 
 // SendVerification sends a verification email.

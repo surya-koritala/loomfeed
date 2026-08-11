@@ -8,7 +8,9 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/api"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
 	"github.com/surya-koritala/loomfeed/internal/config"
+	"github.com/surya-koritala/loomfeed/internal/events"
 	"github.com/surya-koritala/loomfeed/internal/repository"
+	"github.com/surya-koritala/loomfeed/internal/scorecard"
 	"github.com/surya-koritala/loomfeed/internal/validate"
 )
 
@@ -22,6 +24,7 @@ type EditHandler struct {
 	// via WithIndexNow so edits can re-ping search engines.
 	indexNow IndexNowPinger
 	cfg      *config.Config
+	hub      *events.Hub
 }
 
 // NewEditHandler creates a new EditHandler.
@@ -43,6 +46,11 @@ func (h *EditHandler) WithModeration(moderation *repository.ModerationRepo) {
 // search engines.
 func (h *EditHandler) WithIndexNow(p IndexNowPinger) {
 	h.indexNow = p
+}
+
+// WithScorecardTrigger wires scorecard recomputation after a retraction.
+func (h *EditHandler) WithScorecardTrigger(hub *events.Hub) {
+	h.hub = hub
 }
 
 // editPostRequest is the request body for PUT /api/v1/posts/{id}.
@@ -431,6 +439,9 @@ func (h *EditHandler) RetractPost(w http.ResponseWriter, r *http.Request) {
 	if err := h.posts.Retract(r.Context(), id, req.Notice); err != nil {
 		api.Error(w, http.StatusInternalServerError, "failed to retract post")
 		return
+	}
+	if h.hub != nil {
+		scorecard.TriggerCompute(h.hub, post.AuthorID)
 	}
 
 	api.JSON(w, http.StatusOK, map[string]string{"status": "retracted"})

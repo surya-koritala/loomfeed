@@ -2,21 +2,24 @@ package handlers
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/surya-koritala/loomfeed/internal/api"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
+	"github.com/surya-koritala/loomfeed/internal/loom"
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 )
 
 // SearchHandler handles search endpoints.
 type SearchHandler struct {
-	search  *repository.SearchRepo
-	hybrid  *repository.HybridSearchRepo
-	suggest *repository.SuggestRepo
-	follows *repository.FollowRepo
+	search   *repository.SearchRepo
+	hybrid   *repository.HybridSearchRepo
+	suggest  *repository.SuggestRepo
+	follows  *repository.FollowRepo
+	embedder loom.Embedder
 }
 
 // NewSearchHandler creates a new SearchHandler.
@@ -35,6 +38,12 @@ func (h *SearchHandler) WithSuggest(s *repository.SuggestRepo) {
 // unset, the field stays false.
 func (h *SearchHandler) WithFollows(f *repository.FollowRepo) {
 	h.follows = f
+}
+
+// WithEmbedder enables semantic retrieval for hybrid search. It is optional:
+// an unconfigured or unavailable provider leaves the lexical RRF path intact.
+func (h *SearchHandler) WithEmbedder(e loom.Embedder) {
+	h.embedder = e
 }
 
 // populateViewerFollowing marks results whose author the viewer
@@ -106,6 +115,10 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	limit := parseIntQuery(r, "limit", 25)
 	offset := parseIntQuery(r, "offset", 0)
+	cursor := decodeCursorID(r.URL.Query().Get("cursor"))
+	if cursor != "" {
+		offset = 0
+	}
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
 		mode = "hybrid"
@@ -120,7 +133,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	if mode == "text" {
 		// Legacy full-text-only search
-		results, total, err := h.search.SearchPosts(r.Context(), query, limit, offset)
+		results, total, err := h.search.SearchPosts(r.Context(), query, limit, offset, cursor)
 		if err != nil {
 			api.ErrorWithDetail(w, http.StatusInternalServerError, "search failed", err)
 			return
@@ -132,14 +145,19 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 			}
 			h.populateViewerFollowing(r.Context(), refs, claims.ParticipantID)
 		}
-		api.JSON(w, http.StatusOK, models.PaginatedResponse{
+		resp := models.PaginatedResponse{
 			Data:        results,
 			Total:       total,
 			Limit:       limit,
 			Offset:      offset,
-			HasMore:     offset+limit < total,
+			HasMore:     len(results) == limit,
 			RetrievedAt: time.Now(),
-		})
+		}
+		if resp.HasMore && len(results) > 0 {
+			last := results[len(results)-1]
+			resp.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
+		}
+		api.JSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -151,8 +169,37 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		Period:     r.URL.Query().Get("period"),
 	}
 
-	// Hybrid search (default)
-	results, total, err := h.hybrid.HybridSearch(r.Context(), query, limit, offset, filters)
+	// Hybrid search (default). Query embedding is best-effort so provider
+	// outages never turn an otherwise healthy lexical search into a 500.
+	var queryEmbedding []float32
+	if h.embedder != nil {
+		embedCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		vector, embedErr := h.embedder.Embed(embedCtx, query)
+		cancel()
+		switch {
+		case embedErr != nil:
+			slog.Warn("hybrid search: query embedding failed; using lexical fallback", "error", embedErr)
+		case len(vector) != repository.PostEmbeddingDimensions:
+			slog.Warn(
+				"hybrid search: query embedding dimension mismatch; using lexical fallback",
+				"dimensions", len(vector),
+				"expected", repository.PostEmbeddingDimensions,
+			)
+		default:
+			queryEmbedding = vector
+		}
+	}
+
+	var (
+		results []models.SearchResult
+		total   int
+		err     error
+	)
+	if len(queryEmbedding) > 0 {
+		results, total, err = h.hybrid.HybridSearchWithEmbedding(r.Context(), query, queryEmbedding, limit, offset, filters, cursor)
+	} else {
+		results, total, err = h.hybrid.HybridSearch(r.Context(), query, limit, offset, filters, cursor)
+	}
 	if err != nil {
 		api.ErrorWithDetail(w, http.StatusInternalServerError, "search failed", err)
 		return
@@ -166,18 +213,23 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		h.populateViewerFollowing(r.Context(), refs, claims.ParticipantID)
 	}
 
-	api.JSON(w, http.StatusOK, models.SearchResponse{
+	resp := models.SearchResponse{
 		Data:        results,
 		Total:       total,
 		Query:       query,
 		Mode:        mode,
 		Limit:       limit,
 		Offset:      offset,
-		HasMore:     offset+limit < total,
+		HasMore:     len(results) == limit,
 		Community:   filters.Community,
 		AuthorType:  filters.AuthorType,
 		PostType:    filters.PostType,
 		Period:      filters.Period,
 		RetrievedAt: time.Now(),
-	})
+	}
+	if resp.HasMore && len(results) > 0 {
+		last := results[len(results)-1]
+		resp.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
+	}
+	api.JSON(w, http.StatusOK, resp)
 }

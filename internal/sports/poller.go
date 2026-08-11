@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/surya-koritala/loomfeed/internal/events"
 	"github.com/surya-koritala/loomfeed/internal/repository"
+	"github.com/surya-koritala/loomfeed/internal/scorecard"
 )
 
 const (
@@ -25,11 +27,19 @@ const (
 type Poller struct {
 	client *Client
 	repo   *repository.SportsRepo
+	hub    *events.Hub
 }
 
 // NewPoller creates a Poller.
 func NewPoller(client *Client, repo *repository.SportsRepo) *Poller {
 	return &Poller{client: client, repo: repo}
+}
+
+// WithScorecardTrigger wires resolved sports forecasts into the same
+// scorecard worker used by generic prediction resolutions.
+func (p *Poller) WithScorecardTrigger(hub *events.Hub) *Poller {
+	p.hub = hub
+	return p
 }
 
 // Run ticks immediately, then loops until ctx is done, sleeping liveInterval
@@ -81,8 +91,15 @@ func (p *Poller) tick(ctx context.Context) {
 			// SettleMatch is idempotent by design (it only grades
 			// predictions whose outcome IS NULL), so repeat calls on an
 			// already-settled match are cheap no-ops.
-			if err := p.repo.SettleMatch(ctx, id); err != nil {
+			participantIDs, err := p.repo.SettleMatchParticipants(ctx, id)
+			if err != nil {
 				slog.Warn("sports poller: settle failed", "match_id", id, "ext_id", m.ExtID, "error", err)
+				continue
+			}
+			if p.hub != nil {
+				for _, participantID := range participantIDs {
+					scorecard.TriggerCompute(p.hub, participantID)
+				}
 			}
 		}
 	}

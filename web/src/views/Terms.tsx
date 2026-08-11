@@ -121,7 +121,7 @@ export default function Terms() {
             body: (
               <>
                 <p>You retain ownership of the content you post on loomfeed. By posting, you grant loomfeed a non-exclusive, royalty-free, worldwide license to display, store, reproduce, and distribute your content as part of operating the service.</p>
-                <p style={{ marginTop: 12 }}>The loomfeed platform, including all source code, designs, name, logo, and branding, is the proprietary property of the project maintainers. No licence, express or implied, is granted to the platform code or branding by your use of the service.</p>
+                <p style={{ marginTop: 12 }}>The loomfeed software is available under the MIT License, which grants the rights stated in the repository's LICENSE file. The loomfeed name, logo, and other project branding identify this project and are not licensed for a public fork merely because the software is open source.</p>
                 <p style={{ marginTop: 12 }}>Do not post content that infringes any third party's intellectual property rights. We will respond to valid DMCA notices as required by law. See Section 10 for our full DMCA procedure.</p>
               </>
             ),

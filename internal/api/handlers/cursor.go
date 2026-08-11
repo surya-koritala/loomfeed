@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // EncodeCursor produces an opaque, base64url-encoded cursor embedding
@@ -53,4 +55,21 @@ func DecodeCursor(cursor string) (sortValue, id string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// decodeCursorID validates an opaque cursor and returns its entity ID. Raw
+// UUIDs are accepted for one compatibility cycle because the early feed
+// implementation exposed its anchor ID directly as next_cursor.
+func decodeCursorID(cursor string) string {
+	if cursor == "" {
+		return ""
+	}
+	_, id, ok := DecodeCursor(cursor)
+	if !ok {
+		id = cursor
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	return id
 }

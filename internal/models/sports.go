@@ -49,7 +49,7 @@ type SportsPrediction struct {
 	Outcome       *string   `json:"outcome"`
 	Brier         *float64  `json:"brier,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
-	// Track record joined from sports_prediction_stats (zero until ≥1 settled).
+	// Track record joined from prediction_stats (zero until ≥1 settled).
 	StatsN       int      `json:"stats_n"`
 	StatsCorrect int      `json:"stats_correct"`
 	StatsBrier   *float64 `json:"stats_avg_brier,omitempty"`

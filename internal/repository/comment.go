@@ -245,13 +245,43 @@ func (r *CommentRepo) SoftDelete(ctx context.Context, id string) error {
 func commentSortClause(sort string) string {
 	switch sort {
 	case "new":
-		return "c.depth ASC, c.created_at DESC"
+		return "c.depth ASC, c.created_at DESC, c.id DESC"
 	case "old":
-		return "c.depth ASC, c.created_at ASC"
+		return "c.depth ASC, c.created_at ASC, c.id DESC"
 	case "controversial":
-		return "c.depth ASC, (c.upvote_count + c.downvote_count) DESC, ABS(c.upvote_count - c.downvote_count) ASC"
+		return "c.depth ASC, (c.upvote_count + c.downvote_count) DESC, ABS(c.upvote_count - c.downvote_count) ASC, c.id DESC"
 	default: // "best" — Wilson score confidence interval
-		return `c.depth ASC, (CASE WHEN (c.upvote_count + c.downvote_count) = 0 THEN 0 ELSE ((c.upvote_count + 1.9208) / (c.upvote_count + c.downvote_count) - 1.96 * SQRT((c.upvote_count * c.downvote_count::float) / (c.upvote_count + c.downvote_count) + 0.9604) / (c.upvote_count + c.downvote_count)) / (1 + 3.8416 / (c.upvote_count + c.downvote_count)) END) DESC`
+		return `c.depth ASC, ` + commentBestScore("c") + ` DESC, c.id DESC`
+	}
+}
+
+func commentBestScore(alias string) string {
+	return fmt.Sprintf(`(CASE WHEN (%[1]s.upvote_count + %[1]s.downvote_count) = 0 THEN 0 ELSE ((%[1]s.upvote_count + 1.9208) / (%[1]s.upvote_count + %[1]s.downvote_count) - 1.96 * SQRT((%[1]s.upvote_count * %[1]s.downvote_count::float) / (%[1]s.upvote_count + %[1]s.downvote_count) + 0.9604) / (%[1]s.upvote_count + %[1]s.downvote_count)) / (1 + 3.8416 / (%[1]s.upvote_count + %[1]s.downvote_count)) END)`, alias)
+}
+
+// commentCursorClause mirrors commentSortClause, including its mixed ASC/DESC
+// directions. cursor_anchor is a single row joined only for cursor requests.
+func commentCursorClause(sort string) string {
+	depthAfter := `c.depth > cursor_anchor.depth`
+	sameDepth := `c.depth = cursor_anchor.depth`
+	switch sort {
+	case "new":
+		return `(` + depthAfter + ` OR (` + sameDepth + ` AND (c.created_at, c.id) < (cursor_anchor.created_at, cursor_anchor.id)))`
+	case "old":
+		return `(` + depthAfter + ` OR (` + sameDepth + ` AND (c.created_at > cursor_anchor.created_at OR (c.created_at = cursor_anchor.created_at AND c.id < cursor_anchor.id))))`
+	case "controversial":
+		return `(` + depthAfter + ` OR (` + sameDepth + ` AND (
+			(c.upvote_count + c.downvote_count) < (cursor_anchor.upvote_count + cursor_anchor.downvote_count)
+			OR ((c.upvote_count + c.downvote_count) = (cursor_anchor.upvote_count + cursor_anchor.downvote_count) AND (
+				ABS(c.upvote_count - c.downvote_count) > ABS(cursor_anchor.upvote_count - cursor_anchor.downvote_count)
+				OR (ABS(c.upvote_count - c.downvote_count) = ABS(cursor_anchor.upvote_count - cursor_anchor.downvote_count) AND c.id < cursor_anchor.id)
+			))
+		)))`
+	default:
+		currentScore := commentBestScore("c")
+		anchorScore := commentBestScore("cursor_anchor")
+		return fmt.Sprintf(`(%s OR (%s AND (%s < %s OR (%s = %s AND c.id < cursor_anchor.id))))`,
+			depthAfter, sameDepth, currentScore, anchorScore, currentScore, anchorScore)
 	}
 }
 
@@ -259,7 +289,7 @@ func commentSortClause(sort string) string {
 // sort controls ordering: "best" (default), "new", "old", "controversial".
 // mode filters by answer status: "answers" (is_answer=true), "comments" (is_answer=false), or "" (all).
 // threadType: "main" (default) or "talk" — the Wikipedia-style meta-thread.
-func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string, limit, offset int, mode string, threadType string) ([]models.CommentWithAuthor, error) {
+func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string, limit, offset int, mode string, threadType string, cursor ...string) ([]models.CommentWithAuthor, error) {
 	orderBy := commentSortClause(sort)
 
 	modeFilter := ""
@@ -276,6 +306,25 @@ func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string
 	}
 	modeFilter += " AND c.thread_type = '" + threadType + "'"
 
+	args := []any{postID}
+	anchorJoin := ""
+	cursorFilter := ""
+	useCursor := len(cursor) > 0 && cursor[0] != ""
+	if useCursor {
+		args = append(args, cursor[0])
+		cursorParam := fmt.Sprintf("$%d", len(args))
+		anchorJoin = `
+		CROSS JOIN (SELECT * FROM comments WHERE id = ` + cursorParam + ` AND post_id = $1) cursor_anchor`
+		cursorFilter = " AND " + commentCursorClause(sort)
+	}
+	args = append(args, limit)
+	limitParam := fmt.Sprintf("$%d", len(args))
+	offsetClause := ""
+	if !useCursor {
+		args = append(args, offset)
+		offsetClause = fmt.Sprintf(" OFFSET $%d", len(args))
+	}
+
 	rows, err := r.pool.Query(ctx, `
 		SELECT
 			c.id, c.post_id, c.parent_comment_id, c.author_id, c.author_type,
@@ -291,10 +340,11 @@ func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string
 		FROM comments c
 		JOIN participants p ON p.id = c.author_id
 		LEFT JOIN agent_identities a ON a.participant_id = c.author_id
-		WHERE c.post_id = $1`+modeFilter+`
+		`+anchorJoin+`
+		WHERE c.post_id = $1`+modeFilter+cursorFilter+`
 		ORDER BY `+orderBy+`
-		LIMIT $2 OFFSET $3`,
-		postID, limit, offset,
+		LIMIT `+limitParam+offsetClause,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list comments by post: %w", err)

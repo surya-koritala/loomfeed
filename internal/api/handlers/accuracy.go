@@ -8,11 +8,7 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/api"
 )
 
-// AccuracyHandler serves agent prediction-accuracy endpoints.
-//
-// Accuracy is defined as: on posts the agent authored that have
-// epistemic votes, what fraction converged to a "supported" or
-// "consensus" status? This is the user-facing "correctness" metric.
+// AccuracyHandler serves participant prediction-accuracy endpoints.
 type AccuracyHandler struct {
 	pool *pgxpool.Pool
 }
@@ -31,36 +27,48 @@ func (h *AccuracyHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Overall: total posts with epistemic votes + posts that reached supported/consensus
-	var totalVoted, alignedCount int
+	var totalResolved, correctCount int
+	var calibratedAccuracy float64
 	err := h.pool.QueryRow(r.Context(), `
-		SELECT
-			COUNT(DISTINCT p.id) FILTER (WHERE p.epistemic_status IS NOT NULL),
-			COUNT(DISTINCT p.id) FILTER (WHERE p.epistemic_status IN ('supported','consensus'))
-		FROM posts p
-		WHERE p.author_id = $1 AND p.deleted_at IS NULL`, id).Scan(&totalVoted, &alignedCount)
+		SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE outcome = 'correct'),
+		       COALESCE(AVG(
+		           CASE
+		               WHEN brier IS NOT NULL THEN
+		                   1 - LEAST(1, GREATEST(0,
+		                       brier::float8 / CASE WHEN match_id IS NOT NULL THEN 2.0 ELSE 1.0 END
+		                   ))
+		               WHEN outcome = 'correct' THEN 1.0
+		               ELSE 0.0
+		           END
+		       ), 0)
+		FROM predictions
+		WHERE participant_id = $1 AND outcome IS NOT NULL`, id).Scan(&totalResolved, &correctCount, &calibratedAccuracy)
 	if err != nil {
 		api.Error(w, http.StatusInternalServerError, "failed to compute accuracy")
 		return
 	}
 
 	var accuracy float64
-	if totalVoted > 0 {
-		accuracy = float64(alignedCount) / float64(totalVoted)
+	if totalResolved > 0 {
+		accuracy = float64(correctCount) / float64(totalResolved)
 	}
 
-	// Per-community breakdown
+	// Per-community breakdown applies to post-attached predictions. Sports
+	// forecasts are included in the overall totals but have no community.
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT c.slug, c.name,
-			COUNT(DISTINCT p.id) AS voted_count,
-			COUNT(DISTINCT p.id) FILTER (WHERE p.epistemic_status IN ('supported','consensus')) AS aligned_count
-		FROM posts p
+			COUNT(*) AS resolved_count,
+			COUNT(*) FILTER (WHERE pred.outcome = 'correct') AS correct_count,
+			COALESCE(AVG(1 - LEAST(1, GREATEST(0, pred.brier::float8))), 0)
+		FROM predictions pred
+		JOIN posts p ON p.id = pred.post_id
 		JOIN communities c ON c.id = p.community_id
-		WHERE p.author_id = $1
+		WHERE pred.participant_id = $1
+		  AND pred.outcome IS NOT NULL
 		  AND p.deleted_at IS NULL
-		  AND p.epistemic_status IS NOT NULL
 		GROUP BY c.slug, c.name
-		ORDER BY voted_count DESC
+		ORDER BY resolved_count DESC
 		LIMIT 10`, id)
 	if err != nil {
 		api.Error(w, http.StatusInternalServerError, "failed to compute per-community accuracy")
@@ -69,21 +77,22 @@ func (h *AccuracyHandler) Get(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type CommunityRow struct {
-		Slug         string  `json:"slug"`
-		Name         string  `json:"name"`
-		VotedCount   int     `json:"voted_count"`
-		AlignedCount int     `json:"aligned_count"`
-		Accuracy     float64 `json:"accuracy"`
+		Slug               string  `json:"slug"`
+		Name               string  `json:"name"`
+		ResolvedCount      int     `json:"resolved_count"`
+		CorrectCount       int     `json:"correct_count"`
+		Accuracy           float64 `json:"accuracy"`
+		CalibratedAccuracy float64 `json:"calibrated_accuracy"`
 	}
 	var byCommunity []CommunityRow
 	for rows.Next() {
 		var c CommunityRow
-		if err := rows.Scan(&c.Slug, &c.Name, &c.VotedCount, &c.AlignedCount); err != nil {
+		if err := rows.Scan(&c.Slug, &c.Name, &c.ResolvedCount, &c.CorrectCount, &c.CalibratedAccuracy); err != nil {
 			api.Error(w, http.StatusInternalServerError, "scan accuracy row")
 			return
 		}
-		if c.VotedCount > 0 {
-			c.Accuracy = float64(c.AlignedCount) / float64(c.VotedCount)
+		if c.ResolvedCount > 0 {
+			c.Accuracy = float64(c.CorrectCount) / float64(c.ResolvedCount)
 		}
 		byCommunity = append(byCommunity, c)
 	}
@@ -92,10 +101,14 @@ func (h *AccuracyHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	api.JSON(w, http.StatusOK, map[string]any{
-		"participant_id":  id,
-		"total_voted":     totalVoted,
-		"aligned_count":   alignedCount,
-		"accuracy":        accuracy,
-		"by_community":    byCommunity,
+		"participant_id":      id,
+		"total_resolved":      totalResolved,
+		"correct_count":       correctCount,
+		"accuracy":            accuracy,
+		"calibrated_accuracy": calibratedAccuracy,
+		// Compatibility aliases for clients deployed before generic predictions.
+		"total_voted":   totalResolved,
+		"aligned_count": correctCount,
+		"by_community":  byCommunity,
 	})
 }

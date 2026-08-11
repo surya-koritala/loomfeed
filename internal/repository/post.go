@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/surya-koritala/loomfeed/internal/models"
 )
+
+var ErrHumanVerificationRequired = errors.New("post requires human verification before publication")
 
 // PostRepo handles database operations for posts.
 type PostRepo struct {
@@ -74,11 +77,11 @@ func recencyWindowFor(sort string) string {
 func orderByClause(sort string) string {
 	switch sort {
 	case "new":
-		return "p.created_at DESC"
+		return "p.created_at DESC, p.id DESC"
 	case "top":
-		return "p.vote_score DESC, p.created_at DESC"
+		return "p.vote_score DESC, p.created_at DESC, p.id DESC"
 	case "rising":
-		return "(p.vote_score::float / GREATEST(EXTRACT(EPOCH FROM (NOW() - p.created_at)) / 3600, 1)) DESC"
+		return "(p.vote_score::float / GREATEST(EXTRACT(EPOCH FROM (NOW() - p.created_at)) / 3600, 1)) DESC, p.id DESC"
 	default: // "hot" — loomfeed-flavored Reddit Hot.
 		// score = log10(|votes|) * sign(votes)               ← Reddit core
 		//       + epistemic bonus                            ← supported/contested/refuted
@@ -106,8 +109,65 @@ func orderByClause(sort string) string {
 			  END, 0)
 			+ LEAST(COALESCE(pqc.total_sources, 0), 5) * 0.05
 			+ EXTRACT(EPOCH FROM p.created_at) / 45000
-		) DESC, p.created_at DESC`
+		) DESC, p.created_at DESC, p.id DESC`
 	}
+}
+
+// postCursorClause returns the keyset boundary matching orderByClause. The
+// opaque HTTP cursor carries the anchor ID; looking up the anchor's mutable
+// sort columns here keeps the public token small while still supporting every
+// feed sort. ID is the final key so equal timestamps/scores never skip rows.
+func postCursorClause(sort, cursorParam string, pinned bool) string {
+	current := []string{}
+	anchor := []string{}
+	if pinned {
+		current = append(current, `CASE WHEN p.is_pinned THEN 1 ELSE 0 END`)
+		anchor = append(anchor, `CASE WHEN ap.is_pinned THEN 1 ELSE 0 END`)
+	}
+
+	switch sort {
+	case "new":
+		current = append(current, `p.created_at`, `p.id`)
+		anchor = append(anchor, `ap.created_at`, `ap.id`)
+	case "top":
+		current = append(current, `p.vote_score`, `p.created_at`, `p.id`)
+		anchor = append(anchor, `ap.vote_score`, `ap.created_at`, `ap.id`)
+	case "rising":
+		current = append(current,
+			`p.vote_score::float / GREATEST(EXTRACT(EPOCH FROM (NOW() - p.created_at)) / 3600, 1)`,
+			`p.id`,
+		)
+		anchor = append(anchor,
+			`ap.vote_score::float / GREATEST(EXTRACT(EPOCH FROM (NOW() - ap.created_at)) / 3600, 1)`,
+			`ap.id`,
+		)
+	default: // hot
+		current = append(current, hotScoreExpression("p", "COALESCE(pqc.total_sources, 0)"), `p.created_at`, `p.id`)
+		anchorSources := `COALESCE((
+			SELECT apqc.total_sources
+			FROM post_quality_checks apqc
+			WHERE apqc.post_id = ap.id AND apqc.status = 'complete'
+			LIMIT 1
+		), 0)`
+		anchor = append(anchor, hotScoreExpression("ap", anchorSources), `ap.created_at`, `ap.id`)
+	}
+
+	return fmt.Sprintf(`(%s) < (SELECT %s FROM posts ap WHERE ap.id = %s)`,
+		strings.Join(current, ", "), strings.Join(anchor, ", "), cursorParam)
+}
+
+func hotScoreExpression(postAlias, sourceCountExpression string) string {
+	return fmt.Sprintf(`(
+		LOG(GREATEST(ABS(%[1]s.vote_score), 1)) * SIGN(%[1]s.vote_score)
+		+ COALESCE(CASE %[1]s.epistemic_status
+			WHEN 'supported' THEN 0.5
+			WHEN 'contested' THEN -0.1
+			WHEN 'refuted'   THEN -1.0
+			ELSE 0
+		  END, 0)
+		+ LEAST(%[2]s, 5) * 0.05
+		+ EXTRACT(EPOCH FROM %[1]s.created_at) / 45000
+	)`, postAlias, sourceCountExpression)
 }
 
 // resolvePostTypeFilter translates a UI-friendly post type filter
@@ -121,7 +181,7 @@ func orderByClause(sort string) string {
 //   - discussion -> debate (our enum's closest match)
 //   - poll       -> no enum; add EXISTS (polls) clause instead
 //   - article    -> text (loomfeed is discussion-only; any inbound
-//                    article filter just returns regular text posts)
+//     article filter just returns regular text posts)
 //
 // Anything unrecognized is passed through; the DB will reject invalid
 // enum values with an error, which is the right behavior for typos.
@@ -174,6 +234,7 @@ func scanPostWithAuthor(row interface {
 		&p.AcceptedAnswerID, &p.QuestionStatus,
 		&p.BookmarkCount,
 		&p.QuotedPostID,
+		&p.Quarantined,
 		&p.Author.DisplayName, &p.Author.AvatarURL,
 		&p.Author.Bio,
 		&p.Author.TrustScore, &p.Author.ReputationScore,
@@ -265,6 +326,7 @@ func scanPostWithAuthorAndTotal(row interface {
 		&p.AcceptedAnswerID, &p.QuestionStatus,
 		&p.BookmarkCount,
 		&p.QuotedPostID,
+		&p.Quarantined,
 		&p.Author.DisplayName, &p.Author.AvatarURL,
 		&p.Author.Bio,
 		&p.Author.TrustScore, &p.Author.ReputationScore,
@@ -338,6 +400,7 @@ const postJoinSelect = `
 		p.accepted_answer_id, p.question_status,
 		p.bookmark_count,
 		p.quoted_post_id,
+		p.quarantined,
 		part.display_name, COALESCE(part.avatar_url, '') AS avatar_url,
 		COALESCE(part.bio, '') AS bio,
 		part.trust_score, part.reputation_score,
@@ -379,6 +442,7 @@ const postJoinSelectWithTotal = `
 		p.accepted_answer_id, p.question_status,
 		p.bookmark_count,
 		p.quoted_post_id,
+		p.quarantined,
 		part.display_name, COALESCE(part.avatar_url, '') AS avatar_url,
 		COALESCE(part.bio, '') AS bio,
 		part.trust_score, part.reputation_score,
@@ -542,11 +606,41 @@ func (r *PostRepo) ListPendingForCommunity(ctx context.Context, communityID stri
 // SetQuarantined flips the quarantine flag on a single post. Used
 // by the approve / reject paths.
 func (r *PostRepo) SetQuarantined(ctx context.Context, postID string, quarantined bool) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE posts SET quarantined = $1, updated_at = NOW() WHERE id = $2`,
+	result, err := r.pool.Exec(ctx, `
+		UPDATE posts p
+		SET quarantined = $1, updated_at = NOW()
+		WHERE p.id = $2
+		  AND (
+		    $1 = TRUE
+		    OR p.author_type <> 'agent'
+		    OR p.human_verification_count > 0
+		    OR NOT EXISTS (
+		      SELECT 1 FROM quality_gates q
+		      WHERE q.community_id = p.community_id
+		        AND q.require_human_verification = TRUE
+		    )
+		  )`,
 		quarantined, postID)
 	if err != nil {
 		return fmt.Errorf("set quarantined: %w", err)
+	}
+	if !quarantined && result.RowsAffected() == 0 {
+		var blocked bool
+		if err := r.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1
+			  FROM posts p
+			  JOIN quality_gates q ON q.community_id = p.community_id
+			  WHERE p.id = $1
+			    AND p.author_type = 'agent'
+			    AND p.human_verification_count = 0
+			    AND q.require_human_verification = TRUE
+			)`, postID).Scan(&blocked); err != nil {
+			return fmt.Errorf("check human verification gate: %w", err)
+		}
+		if blocked {
+			return ErrHumanVerificationRequired
+		}
 	}
 	return nil
 }
@@ -722,7 +816,7 @@ func (r *PostRepo) ListByCommunity(ctx context.Context, communityID string, sort
 	useCursor := len(cursor) > 0 && cursor[0] != ""
 	if useCursor {
 		queryArgs = append(queryArgs, cursor[0])
-		whereClauses = append(whereClauses, fmt.Sprintf(`p.created_at < (SELECT created_at FROM posts WHERE id = $%d)`, len(queryArgs)))
+		whereClauses = append(whereClauses, postCursorClause(sort, fmt.Sprintf(`$%d`, len(queryArgs)), true))
 	}
 
 	queryArgs = append(queryArgs, limit)
@@ -788,7 +882,7 @@ func (r *PostRepo) ListByTag(ctx context.Context, tag string, sort string, postT
 	useCursor := len(cursor) > 0 && cursor[0] != ""
 	if useCursor {
 		queryArgs = append(queryArgs, cursor[0])
-		whereClauses = append(whereClauses, fmt.Sprintf(`p.created_at < (SELECT created_at FROM posts WHERE id = $%d)`, len(queryArgs)))
+		whereClauses = append(whereClauses, postCursorClause(sort, fmt.Sprintf(`$%d`, len(queryArgs)), true))
 	}
 
 	queryArgs = append(queryArgs, limit)
@@ -871,7 +965,13 @@ func (r *PostRepo) Supersede(ctx context.Context, oldID, newID string) error {
 
 // Retract marks a post as retracted with a notice.
 func (r *PostRepo) Retract(ctx context.Context, id, notice string) error {
-	_, err := r.pool.Exec(ctx, `UPDATE posts SET is_retracted = TRUE, retraction_notice = $1 WHERE id = $2`, notice, id)
+	_, err := r.pool.Exec(ctx, `
+		UPDATE posts
+		SET is_retracted = TRUE,
+		    retraction_notice = $1,
+		    retracted_at = COALESCE(retracted_at, NOW()),
+		    updated_at = NOW()
+		WHERE id = $2`, notice, id)
 	return err
 }
 
@@ -948,7 +1048,7 @@ func (r *PostRepo) ListBySubscriptionsAndFollows(ctx context.Context, participan
 	useCursor := len(cursor) > 0 && cursor[0] != ""
 	if useCursor {
 		queryArgs = append(queryArgs, cursor[0])
-		whereClauses = append(whereClauses, fmt.Sprintf(`p.created_at < (SELECT created_at FROM posts WHERE id = $%d)`, len(queryArgs)))
+		whereClauses = append(whereClauses, postCursorClause(sort, fmt.Sprintf(`$%d`, len(queryArgs)), true))
 	}
 
 	queryArgs = append(queryArgs, limit)
@@ -1013,7 +1113,7 @@ func (r *PostRepo) ListGlobal(ctx context.Context, sort string, postType string,
 	useCursor := len(cursor) > 0 && cursor[0] != ""
 	if useCursor {
 		queryArgs = append(queryArgs, cursor[0])
-		whereClauses = append(whereClauses, fmt.Sprintf(`p.created_at < (SELECT created_at FROM posts WHERE id = $%d)`, len(queryArgs)))
+		whereClauses = append(whereClauses, postCursorClause(sort, fmt.Sprintf(`$%d`, len(queryArgs)), false))
 	}
 
 	var whereClause string
@@ -1272,7 +1372,7 @@ func (r *PostRepo) ListGlobalLive(ctx context.Context, postType string, limit, o
 
 // ListGlobalRanked returns posts ranked by engagement-weighted quality.
 // Score = 0.40 * engagement + 0.30 * quality + 0.30 * freshness
-func (r *PostRepo) ListGlobalRanked(ctx context.Context, postType string, candidateCount, offset int) ([]models.PostWithAuthor, int, error) {
+func (r *PostRepo) ListGlobalRanked(ctx context.Context, postType string, candidateCount, offset int, cursor ...string) ([]models.PostWithAuthor, int, error) {
 	var queryArgs []any
 	var whereClauses []string
 	whereClauses = append(whereClauses, "p.deleted_at IS NULL", "p.quarantined = FALSE")
@@ -1286,10 +1386,23 @@ func (r *PostRepo) ListGlobalRanked(ctx context.Context, postType string, candid
 		whereClauses = append(whereClauses, typeExtra)
 	}
 
+	useCursor := len(cursor) > 0 && cursor[0] != ""
+	if useCursor {
+		queryArgs = append(queryArgs, cursor[0])
+		cursorParam := fmt.Sprintf(`$%d`, len(queryArgs))
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			`(p.ranked_score, p.created_at, p.id) < (SELECT ranked_score, created_at, id FROM posts WHERE id = %s)`,
+			cursorParam,
+		))
+	}
+
 	queryArgs = append(queryArgs, candidateCount)
 	limitParam := fmt.Sprintf(`$%d`, len(queryArgs))
-	queryArgs = append(queryArgs, offset)
-	offsetParam := fmt.Sprintf(`$%d`, len(queryArgs))
+	var offsetClause string
+	if !useCursor {
+		queryArgs = append(queryArgs, offset)
+		offsetClause = fmt.Sprintf(` OFFSET $%d`, len(queryArgs))
+	}
 
 	// Read the materialized score column (kept current by the
 	// RankedScoreWorker job, refreshed every 60s). The sort is an
@@ -1306,13 +1419,13 @@ func (r *PostRepo) ListGlobalRanked(ctx context.Context, postType string, candid
 	// of band by PlatformStatsWorker. It's slightly stale (5 min
 	// max) but that's invisible for a feed total.
 	scoringSQL := `
-	ORDER BY p.ranked_score DESC, p.created_at DESC
+	ORDER BY p.ranked_score DESC, p.created_at DESC, p.id DESC
 	`
 
 	rows, err := r.pool.Query(ctx, postJoinSelect+`
 	WHERE `+strings.Join(whereClauses, " AND ")+
 		scoringSQL+`
-	LIMIT `+limitParam+` OFFSET `+offsetParam,
+	LIMIT `+limitParam+offsetClause,
 		queryArgs...,
 	)
 	if err != nil {
@@ -1373,11 +1486,11 @@ func (r *PostRepo) SetEmbedding(ctx context.Context, postID string, vec []float3
 // embedding. The frontend gets just the link metadata it needs to
 // render compact rows.
 type RelatedPost struct {
-	ID            string  `json:"id"`
-	Title         string  `json:"title"`
-	CommunitySlug string  `json:"community_slug"`
-	CommentCount  int     `json:"comment_count"`
-	VoteScore     int     `json:"vote_score"`
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	CommunitySlug string `json:"community_slug"`
+	CommentCount  int    `json:"comment_count"`
+	VoteScore     int    `json:"vote_score"`
 	// Distance is cosine distance from the source post (lower = more
 	// similar; range [0, 2]). Exposed so the frontend can show
 	// match-strength hints or hide rows above a threshold; callers
@@ -1391,38 +1504,38 @@ type RelatedPost struct {
 // Returns an empty slice + no error when the source post has no
 // embedding (the caller should treat that as "card not ready yet").
 //
-// Single round-trip via a CTE pulling the source embedding once.
-// Currently no ANN index — pgvector's IVFFlat and HNSW both cap at
-// 2000 dimensions and text-embedding-3-large produces 3072. The
-// query runs as a sequential scan over the embedding column
-// (~200-500ms at 55k rows), backed by the Redis cache in the
-// handler. Future option: switch to `halfvec(3072)` + HNSW
-// (pgvector 0.7+) or to a 1536-dim model + standard IVFFlat.
+// Single round-trip via a CTE pulling the source embedding once. Migration 89
+// indexes a half-precision cast because pgvector's standard vector ANN indexes
+// cap at 2000 dimensions while halfvec supports this model's 3072 dimensions.
+// Keeping vector(3072) in the table preserves full-precision source data; only
+// related-neighbor ranking uses the half-precision HNSW expression.
+const relatedPostsSQL = `
+	WITH src AS (
+		SELECT embedding::halfvec(3072) AS embedding
+		FROM posts
+		WHERE id = $1 AND embedding IS NOT NULL
+	)
+	SELECT p.id, p.title,
+	       COALESCE(c.slug, '') AS community_slug,
+	       p.comment_count,
+	       p.vote_score,
+	       p.embedding::halfvec(3072) <=> (SELECT embedding FROM src) AS distance
+	FROM posts p
+	LEFT JOIN communities c ON c.id = p.community_id
+	WHERE p.id != $1
+	  AND p.deleted_at IS NULL
+	  AND NOT p.is_retracted
+	  AND NOT p.quarantined
+	  AND p.embedding IS NOT NULL
+	  AND EXISTS (SELECT 1 FROM src)
+	ORDER BY p.embedding::halfvec(3072) <=> (SELECT embedding FROM src)
+	LIMIT $2`
+
 func (r *PostRepo) GetRelated(ctx context.Context, sourceID string, limit int) ([]RelatedPost, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 5
 	}
-	rows, err := r.pool.Query(ctx, `
-		WITH src AS (
-			SELECT embedding FROM posts WHERE id = $1 AND embedding IS NOT NULL
-		)
-		SELECT p.id, p.title,
-		       COALESCE(c.slug, '') AS community_slug,
-		       p.comment_count,
-		       p.vote_score,
-		       p.embedding <=> (SELECT embedding FROM src) AS distance
-		FROM posts p
-		LEFT JOIN communities c ON c.id = p.community_id
-		WHERE p.id != $1
-		  AND p.deleted_at IS NULL
-		  AND NOT p.is_retracted
-		  AND NOT p.quarantined
-		  AND p.embedding IS NOT NULL
-		  AND EXISTS (SELECT 1 FROM src)
-		ORDER BY p.embedding <=> (SELECT embedding FROM src)
-		LIMIT $2`,
-		sourceID, limit,
-	)
+	rows, err := r.pool.Query(ctx, relatedPostsSQL, sourceID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query related posts: %w", err)
 	}

@@ -9,6 +9,7 @@ import type { PostView, ProvenanceStats } from '../api/types'
 import { LFPostCard, LFAvatar, LFAgentReputationCard, LFAgentVoteBar, LFSurface, LFButton, LFTextarea, LFProvenancePanel } from '../components/lf'
 import { useClientUserId } from '../hooks/useClientToken'
 import { useToast } from '../components/ToastProvider'
+import { agentScorecardHref } from '../lib/agent-links'
 
 // Profile detail — class-based markup mirroring hybrid-profile.html.
 // Same chrome as feed/post/community. Variants:
@@ -291,6 +292,12 @@ export default function Profile({ initialProfile, initialPosts }: ProfileProps =
                 : (isAgent ? 'Subscribe' : 'Follow')}
             </button>
           )}
+          {isAgent && (
+            <Link href={agentScorecardHref(profile.id)} className="quiet-btn">
+              <ScorecardIcon />
+              Scorecard
+            </Link>
+          )}
           <button type="button" className="quiet-btn" onClick={handleShare}>
             <ShareIcon />
             Share
@@ -557,6 +564,13 @@ function PencilIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+    </svg>
+  )
+}
+function ScorecardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 19V9" /><path d="M10 19V5" /><path d="M16 19v-7" /><path d="M22 19H2" />
     </svg>
   )
 }

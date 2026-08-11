@@ -10,6 +10,8 @@ import { useToast } from '../components/ToastProvider'
 import MarkdownContent from '../components/MarkdownContent'
 import RevisionModal from '../components/RevisionModal'
 import PostReceipt from '../components/PostReceipt'
+import CitationGraphExplorer from '../components/CitationGraphExplorer'
+import PredictionPanel from '../components/PredictionPanel'
 import {
   LFAvatar,
   LFCommentTree,
@@ -146,6 +148,8 @@ export default function PostDetail({ initialPost, initialComments }: PostDetailP
     Array.isArray(initialComments) ? initialComments.map(mapApiComment).filter(notLoom) : [],
   )
   const [commentsLoading, setCommentsLoading] = useState(!initialComments)
+  const [commentsLoadingMore, setCommentsLoadingMore] = useState(false)
+  const [commentsCursor, setCommentsCursor] = useState('')
   const [commentSort, setCommentSort] = useState<CommentSort>('top')
   const [composerBody, setComposerBody] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -172,10 +176,11 @@ export default function PostDetail({ initialPost, initialComments }: PostDetailP
 
     if (!initialComments) setCommentsLoading(true)
     api
-      .getComments(id, 100, 0)
-      .then((d: any) => {
-        const arr = Array.isArray(d) ? d : d?.data ?? d?.comments ?? []
-        setComments(arr.map(mapApiComment).filter(notLoom))
+	  .getCommentsPage(id, 100)
+	  .then((page: any) => {
+		const arr = Array.isArray(page?.data) ? page.data : []
+		setComments(arr.map(mapApiComment).filter(notLoom))
+		setCommentsCursor(page?.nextCursor ?? '')
       })
       .catch(() => {})
       .finally(() => setCommentsLoading(false))
@@ -201,6 +206,22 @@ export default function PostDetail({ initialPost, initialComments }: PostDetailP
     // logic above runs once per id change regardless.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
+
+  const loadMoreComments = useCallback(async () => {
+    if (!id || !commentsCursor || commentsLoadingMore) return
+    setCommentsLoadingMore(true)
+    try {
+      const page: any = await api.getCommentsPage(id, 100, commentsCursor)
+      const incoming = (Array.isArray(page?.data) ? page.data : []).map(mapApiComment).filter(notLoom)
+      setComments((current) => {
+        const seen = new Set(current.map((comment) => comment.id))
+        return [...current, ...incoming.filter((comment: CommentV) => !seen.has(comment.id))]
+      })
+      setCommentsCursor(page?.nextCursor ?? '')
+    } finally {
+      setCommentsLoadingMore(false)
+    }
+  }, [id, commentsCursor, commentsLoadingMore])
 
   // Loom card state. Tracks the per-post AI summary that lives ABOVE
   // the comment thread (Community-Notes pattern). Loaded on mount;
@@ -967,6 +988,8 @@ export default function PostDetail({ initialPost, initialComments }: PostDetailP
           below the body because for a poll post the poll IS the content. */}
       <LFPollCard postId={id} />
 
+      <PredictionPanel postId={post.id} postTitle={post.title} authorId={post.authorId} />
+
       {/* sources strip — toggles a flat citation list inline below.
           The drawer renders the same `.citation` markup we'd use on a
           dedicated /sources page; opening it inline avoids a dead
@@ -989,6 +1012,8 @@ export default function PostDetail({ initialPost, initialComments }: PostDetailP
           )}
         </>
       )}
+
+      <CitationGraphExplorer postId={post.id} />
 
       {/* Phase 2.1 — Receipt link. Always renders so a reader can
           audit any post (even those with zero declared sources —
@@ -1213,13 +1238,22 @@ export default function PostDetail({ initialPost, initialComments }: PostDetailP
       {/* comment thread */}
       {commentsLoading ? (
         <div className="lf-empty">Loading comments…</div>
-      ) : (
-        <LFCommentTree
-          postId={post.id}
-          comments={tree}
-          onVote={handleCommentVote}
-          onSubmitReply={handleReplySubmit}
-        />
+	  ) : (
+		<>
+		  <LFCommentTree
+			postId={post.id}
+			comments={tree}
+			onVote={handleCommentVote}
+			onSubmitReply={handleReplySubmit}
+		  />
+		  {commentsCursor && (
+			<div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0' }}>
+			  <button type="button" className="lf-btn lf-btn-secondary" disabled={commentsLoadingMore} onClick={loadMoreComments}>
+				{commentsLoadingMore ? 'Loading…' : 'Load more comments'}
+			  </button>
+			</div>
+		  )}
+		</>
       )}
 
       {/* Phase 1.4 — edit-history modal. Lazy-mounted so we don't

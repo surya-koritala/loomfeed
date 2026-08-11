@@ -19,7 +19,8 @@ const tierColors: Record<string, string> = {
 const signalLabels: Record<string, string> = {
   trustScore: 'Trust Score',
   reputation: 'Reputation',
-  epistemicAccuracy: 'Epistemic Accuracy',
+  predictionAccuracy: 'Prediction Accuracy',
+  correctionRate: 'Correction Rate',
   contentQuality: 'Content Quality',
   sourceReliability: 'Source Reliability',
   postCount: 'Post Volume',
@@ -30,7 +31,7 @@ const signalLabels: Record<string, string> = {
 }
 
 const signalOrder = [
-  'epistemicAccuracy', 'trustScore', 'contentQuality', 'sourceReliability',
+  'predictionAccuracy', 'correctionRate', 'trustScore', 'contentQuality', 'sourceReliability',
   'acceptanceRate', 'reputation', 'postCount', 'domainExpertise',
   'verification', 'tenure',
 ]
@@ -61,8 +62,9 @@ export default function ScorecardFull({ participantId }: ScorecardFullProps) {
   const color = tierColors[tier] || tierColors.new
   const signals = data.signals || {}
   const accuracyPct = safeNumber(accuracy?.accuracy, 0)
-  const totalVoted = safeNumber(accuracy?.totalVoted, 0)
-  const alignedCount = safeNumber(accuracy?.alignedCount, 0)
+  const totalResolved = safeNumber(accuracy?.totalResolved ?? accuracy?.totalVoted, 0)
+  const correctCount = safeNumber(accuracy?.correctCount ?? accuracy?.alignedCount, 0)
+  const calibratedAccuracy = safeNumber(accuracy?.calibratedAccuracy, 0)
   const byCommunity = Array.isArray(accuracy?.byCommunity) ? accuracy.byCommunity : []
 
   return (
@@ -85,7 +87,7 @@ export default function ScorecardFull({ participantId }: ScorecardFullProps) {
         </div>
       </div>
 
-      {totalVoted > 0 && (
+      {totalResolved > 0 && (
         <div style={{
           padding: 16,
           background: 'var(--lf-paper-alt)',
@@ -101,7 +103,7 @@ export default function ScorecardFull({ participantId }: ScorecardFullProps) {
             </span>
           </div>
           <div className="lf-text-caption" style={{ color: 'var(--lf-muted)', marginBottom: byCommunity.length ? 12 : 0 }}>
-            {alignedCount} of {totalVoted} posts converged to supported or consensus
+            {correctCount} of {totalResolved} resolved predictions were correct · {Math.round(calibratedAccuracy * 100)}% confidence-calibrated skill
           </div>
           {byCommunity.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
@@ -112,7 +114,7 @@ export default function ScorecardFull({ participantId }: ScorecardFullProps) {
                 <div key={c.slug} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                   <span style={{ color: 'var(--lf-ink)' }}>a/{c.slug}</span>
                   <span style={{ fontFamily: 'var(--lf-font-mono)', color: 'var(--lf-muted)' }}>
-                    {safeNumber(c.alignedCount)}/{safeNumber(c.votedCount)} &middot; {Math.round(safeNumber(c.accuracy) * 100)}%
+                    {safeNumber(c.correctCount ?? c.alignedCount)}/{safeNumber(c.resolvedCount ?? c.votedCount)} &middot; {Math.round(safeNumber(c.accuracy) * 100)}%
                   </span>
                 </div>
               ))}

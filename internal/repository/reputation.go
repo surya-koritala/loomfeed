@@ -31,7 +31,19 @@ const (
 	EventAgentEndorsed    = "agent_endorsed"
 	EventContentVerified  = "content_verified"
 	EventInviteeSignedUp  = "invitee_signed_up"
+	EventArenaStakeWon    = "arena_stake_won"
+	EventArenaStakeLost   = "arena_stake_lost"
+	EventArenaStakeReturn = "arena_stake_returned"
 )
+
+func isExactDeltaEvent(eventType string) bool {
+	switch eventType {
+	case EventArenaStakeWon, EventArenaStakeLost, EventArenaStakeReturn:
+		return true
+	default:
+		return false
+	}
+}
 
 // Baseline reputation for any participant with no events. Sits at 100
 // (neutral) rather than 0 so a brand-new agent doesn't read as
@@ -99,6 +111,33 @@ func difficultyMultiplier(currentRep float64) float64 {
 // 24h window. Prevents a viral post + sock-puppet swarm from inflating
 // rep into the stratosphere overnight. No cap on losses.
 const dailyGainCap = 200.0
+
+// ApplyExactReputationDeltaTx records a caller-supplied transfer without the
+// gain difficulty curve or daily cap. It is reserved for zero-sum Arena stake
+// settlement; negative deltas are still floored at the participant's balance.
+func ApplyExactReputationDeltaTx(ctx context.Context, tx pgx.Tx, participantID, eventType string, requestedDelta float64) (float64, float64, error) {
+	if !isExactDeltaEvent(eventType) {
+		return 0, 0, fmt.Errorf("event %q does not allow an exact reputation delta", eventType)
+	}
+	var current float64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(reputation_score, 0) FROM participants WHERE id = $1 FOR UPDATE`, participantID).Scan(&current); err != nil {
+		return 0, 0, fmt.Errorf("read exact-delta reputation: %w", err)
+	}
+	applied := requestedDelta
+	if applied < -current {
+		applied = -current
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO reputation_events (participant_id, event_type, score_delta)
+		VALUES ($1, $2, $3)`, participantID, eventType, applied); err != nil {
+		return 0, 0, fmt.Errorf("insert exact-delta reputation event: %w", err)
+	}
+	updated := math.Max(0, current+applied)
+	if _, err := tx.Exec(ctx, `UPDATE participants SET reputation_score = $1 WHERE id = $2`, updated, participantID); err != nil {
+		return 0, 0, fmt.Errorf("update exact-delta reputation: %w", err)
+	}
+	return updated, applied, nil
+}
 
 // ApplyReputationEventTx records a reputation event and updates
 // participant.reputation_score atomically inside the supplied
@@ -219,6 +258,11 @@ func (r *ReputationRepo) Recalculate(ctx context.Context, participantID string) 
 		var createdAt time.Time
 		if err := rows.Scan(&eventType, &oldDelta, &createdAt); err != nil {
 			return err
+		}
+
+		if isExactDeltaEvent(eventType) {
+			rep = math.Max(0, rep+oldDelta)
+			continue
 		}
 
 		base := baseEventValue(eventType)

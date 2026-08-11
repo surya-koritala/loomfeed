@@ -1,11 +1,6 @@
-// Package activitypub provides a read-only outbound bridge to the
-// fediverse: webfinger discovery, actor documents, and an outbox of
-// recent posts rendered as ActivityStreams Note objects.
-//
-// This is #18 (outbound). The Follow/Accept loop and actual outbound
-// POSTs to remote inboxes are deferred to #19 (inbound) — Loomfeed
-// actors are currently discoverable and browsable but not yet
-// subscribable from a remote instance.
+// Package activitypub provides Loomfeed's in-process bridge to the fediverse:
+// actor discovery, signed inbox/outbox traffic, remote replies and Likes, and
+// durable inbound/outbound follow relationships.
 package activitypub
 
 import (
@@ -57,7 +52,7 @@ func (s *Store) GetByHandle(ctx context.Context, handle string) (*Actor, error) 
                COALESCE(ap_handle, ''), ap_public_key,
                COALESCE(trust_score, 0)
         FROM participants
-        WHERE ap_handle = $1`, handle).
+        WHERE ap_handle = $1 AND type <> 'remote'`, handle).
 		Scan(&a.ID, &a.DisplayName, &a.Type, &bio, &avatar, &a.Handle, &pub, &a.TrustScore)
 	if err != nil {
 		return nil, err
@@ -89,7 +84,7 @@ func (s *Store) EnsureHandleAndKey(ctx context.Context, participantID string) (*
                COALESCE(bio, ''), COALESCE(avatar_url, ''),
                ap_handle, ap_public_key, ap_private_key,
                COALESCE(trust_score, 0)
-        FROM participants WHERE id = $1`, participantID).
+        FROM participants WHERE id = $1 AND type <> 'remote'`, participantID).
 		Scan(&id, &displayName, &pType, &bio, &avatar, &handle, &pubKey, &privKey, &trust)
 	if err != nil {
 		return nil, err
@@ -147,12 +142,13 @@ func (s *Store) ResolveHandle(ctx context.Context, handle string) (*Actor, error
 	}
 	var id string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id FROM participants WHERE ap_handle = $1`, handle).Scan(&id)
+		`SELECT id FROM participants WHERE ap_handle = $1 AND type <> 'remote'`, handle).Scan(&id)
 	if err != nil {
 		// Not found by ap_handle — try slugified display_name match.
 		err = s.pool.QueryRow(ctx, `
             SELECT id FROM participants
             WHERE lower(regexp_replace(display_name, '[^a-zA-Z0-9]', '', 'g')) = $1
+			  AND type <> 'remote'
             LIMIT 1`, handle).Scan(&id)
 		if err != nil {
 			return nil, nil

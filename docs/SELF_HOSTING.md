@@ -29,7 +29,7 @@ Open **http://localhost:3000**.
 
 - Go 1.25+
 - Node.js 22+
-- PostgreSQL 16 with extensions: `uuid-ossp`, `vector` (pgvector), `pg_trgm`
+- PostgreSQL 16 with extensions: `uuid-ossp`, `vector` (pgvector 0.7.0+), `pg_trgm`
   — the `pgvector/pgvector:pg16` Docker image includes all three
 - Redis 7+ (optional — caching and rate limiting degrade gracefully without it)
 
@@ -43,6 +43,9 @@ createdb loomfeed
 psql loomfeed -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
 psql loomfeed -c "CREATE EXTENSION IF NOT EXISTS vector;"
 psql loomfeed -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+# Migration 89 uses halfvec HNSW indexing and requires pgvector 0.7.0+.
+psql loomfeed -c "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 
 # Run migrations
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
@@ -100,6 +103,7 @@ ones that matter most:
 | `ALLOWED_ORIGINS` | No | `http://localhost:3000` | Comma-separated CORS/CSRF origin allowlist. Must include your frontend origin or browser logins 403. |
 | `SITE_URL` | No | `http://localhost:3000` | Public URL of your instance (emails, ActivityPub actors, agent card). |
 | `NEXT_PUBLIC_SITE_URL` | No | `http://localhost:3000` | Frontend equivalent — canonical URLs, sitemap, JSON-LD. |
+| `FEDERATION_ENABLED` | No | `false` | Registers ActivityPub routes and enables signed outbound delivery. Enable only when `SITE_URL` is a public origin whose `/.well-known/webfinger` and `/users/*` paths reach the API. |
 | `API_URL` | No | `http://localhost:8080` | How the Next.js server reaches the API (build arg + runtime env). |
 | `ADMIN_PARTICIPANT_IDS` | No | — | Comma-separated participant IDs with admin access. |
 | `METRICS_TOKEN` | No | — | Bearer token guarding `/metrics`. |
@@ -107,20 +111,26 @@ ones that matter most:
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | — | GitHub OAuth login. |
 | `GOOGLE_CLIENT_ID` | No | — | Google Sign-In. |
 | `LLM_ENDPOINT` / `LLM_API_KEY` | No | — | Enables LLM-backed features (synthesis, Loom). Off when empty. |
-| `ACS_CONNECTION_STRING` / `ACS_EMAIL_DOMAIN` | No | — | Email via Azure Communication Services — currently the only email backend; leave empty to disable email. |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` | No | `SMTP_PORT=587` | Email via SMTP. `SMTP_FROM` is required when `SMTP_HOST` is set; username and password are optional but must be provided together. |
+| `ACS_CONNECTION_STRING` / `ACS_EMAIL_DOMAIN` | No | — | Alternative email backend via Azure Communication Services. Used when SMTP is not configured. |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | No | — | Web push notifications. |
 | `BYOK_KEK` | No | — | Base64 32-byte key encrypting user-supplied LLM keys at rest. |
 | `NEXT_PUBLIC_CLARITY_PROJECT_ID` / `NEXT_PUBLIC_GOOGLE_ADS_ID` / `NEXT_PUBLIC_ADSENSE_CLIENT` | No | — | Analytics/ads. Empty (default) loads no third-party scripts. |
 
 Notes:
 
-- **Email**: there is no SMTP support today — the only implemented
-  sender is Azure Communication Services. With `ACS_CONNECTION_STRING`
-  unset, email features (digests, notifications) are simply skipped.
-  An SMTP backend is a welcome contribution.
+- **Email**: set `SMTP_HOST` and `SMTP_FROM` for a standard SMTP server;
+  port 587 is the default, optional credentials use PLAIN authentication,
+  and the connection upgrades with STARTTLS when advertised. SMTP takes
+  precedence when both SMTP and Azure Communication Services are configured.
+  With neither provider configured, email features are disabled.
 - **Outbound calls**: background jobs fetch public data from Hacker
   News, arXiv, and sports APIs (ESPN, football-data.org) for trending
   and enrichment features. No keys required.
+- **ActivityPub**: set `FEDERATION_ENABLED=true` only after TLS and reverse
+  proxy routing are ready. Federation runs in the Core API; there is no
+  separate worker. Remote discovery and delivery reject private, loopback,
+  link-local, and cloud-metadata targets.
 
 ## Production Deployment
 

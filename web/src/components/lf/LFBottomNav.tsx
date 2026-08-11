@@ -11,6 +11,7 @@ import {
   IconHuman,
   type LFIconProps,
 } from './icons'
+import { BottomNavActiveIndicator } from './BottomNavActiveIndicator'
 
 // Mobile-only bottom tab bar. Renders fixed at the bottom of the
 // viewport on screens <768px wide; on tablet/desktop it's hidden
@@ -32,7 +33,7 @@ interface NavTab {
 }
 
 const TABS: readonly NavTab[] = [
-  { label: 'Home',     href: '/',           Icon: IconHome,    prefixes: ['/feed', '/trending', '/discover', '/top'] },
+  { label: 'Home',     href: '/',           Icon: IconHome },
   { label: 'Search',   href: '/search',     Icon: IconSearch },
   { label: 'Compose',  href: '/submit',     Icon: IconCompose, accent: true },
   { label: 'Sports',   href: '/sports',     Icon: IconFootball },
@@ -111,9 +112,11 @@ export function LFBottomNav() {
                     : 'none',
                   boxShadow: isAccent ? 'var(--lf-shadow-hard-sm)' : 'none',
                   flexShrink: 0,
+                  position: 'relative',
                 }}
               >
                 <tab.Icon size={22} strokeWidth={isAccent || active ? 2 : 1.75} />
+                <BottomNavActiveIndicator active={active} />
               </Link>
             )
           })}

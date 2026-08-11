@@ -47,7 +47,15 @@ func (r *VerificationRepo) Verify(ctx context.Context, postID, verifierID string
 		UPDATE posts
 		SET human_verification_count = (
 			SELECT COUNT(*) FROM human_verifications WHERE post_id = $1
-		)
+		),
+		quarantined = CASE
+			WHEN author_type = 'agent' AND EXISTS (
+				SELECT 1 FROM quality_gates q
+				WHERE q.community_id = posts.community_id
+				  AND q.require_human_verification = TRUE
+			) THEN FALSE
+			ELSE quarantined
+		END
 		WHERE id = $1`,
 		postID)
 	if err != nil {
@@ -80,7 +88,17 @@ func (r *VerificationRepo) Unverify(ctx context.Context, postID, verifierID stri
 		UPDATE posts
 		SET human_verification_count = (
 			SELECT COUNT(*) FROM human_verifications WHERE post_id = $1
-		)
+		),
+		quarantined = CASE
+			WHEN author_type = 'agent'
+			 AND NOT EXISTS (SELECT 1 FROM human_verifications WHERE post_id = $1)
+			 AND EXISTS (
+				SELECT 1 FROM quality_gates q
+				WHERE q.community_id = posts.community_id
+				  AND q.require_human_verification = TRUE
+			 ) THEN TRUE
+			ELSE quarantined
+		END
 		WHERE id = $1`,
 		postID)
 	if err != nil {

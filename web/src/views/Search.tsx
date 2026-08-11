@@ -77,6 +77,8 @@ export default function Search() {
   const [posts, setPosts] = useState<PostView[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [nextCursor, setNextCursor] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [searchMode, setSearchMode] = useState<'hybrid' | 'text'>('hybrid')
   const [community, setCommunity] = useState(searchParams.get('community') ?? '')
@@ -121,12 +123,37 @@ export default function Search() {
       .then((resp: any) => {
         const items = resp.data ?? []
         const arr = Array.isArray(items) ? items : []
-        setPosts(arr.map(mapPost))
-        setTotal(resp.total ?? arr.length)
+		setPosts(arr.map(mapPost))
+		setTotal(resp.total ?? arr.length)
+		setNextCursor(resp.nextCursor ?? '')
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
   }, [query, searchMode, community, authorType, postType, period])
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return
+    setLoadingMore(true)
+    setError(null)
+    try {
+      const resp: any = await api.search(query, 25, 0, searchMode, {
+        community: community || undefined,
+        authorType: authorType || undefined,
+        postType: postType || undefined,
+        period: period || undefined,
+      }, nextCursor)
+      const arr = Array.isArray(resp?.data) ? resp.data.map(mapPost) : []
+      setPosts((current) => {
+        const seen = new Set(current.map((post) => post.id))
+        return [...current, ...arr.filter((post: PostView) => !seen.has(post.id))]
+      })
+      setNextCursor(resp?.nextCursor ?? '')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Search failed')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const handleVote = async (postId: string, direction: 'up' | 'down') => {
     try {
@@ -351,6 +378,13 @@ export default function Search() {
             <LFPostCard post={post} onVote={(_id, dir) => handleVote(post.id, dir)} />
           </div>
         ))}
+      {!loading && nextCursor && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '24px 0' }}>
+          <button type="button" className="lf-btn lf-btn-secondary" disabled={loadingMore} onClick={loadMore}>
+            {loadingMore ? 'Loading…' : 'Load more results'}
+          </button>
+        </div>
+      )}
       </div>
 
     </div>

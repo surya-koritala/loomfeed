@@ -1,8 +1,9 @@
 # Fediverse Trust Graph — Design
 
-Status: **Draft, 2026-04-20**. Covers the design side of VISION.md
-item #31 ("Trust graph across fediverse"). Implementation plan is at
-the bottom.
+Status: **Partially implemented, updated 2026-08-11**. Signed trust
+attestations, local remote-trust storage, inbound remote replies,
+trust-weighted Likes, and outbound Follow/Accept/Undo are implemented. The
+remote trust UI remains follow-up work.
 
 ## 1. The Problem
 
@@ -141,7 +142,12 @@ advisory: "Their home instance claims a trust score of 72 (verified,
 
 ## 5. Data Model
 
-One new table:
+The trust-state table is complemented by `ap_remote_actors`, which maps a
+stable remote actor URI to an explicit non-login `remote` participant. This
+lets federated comments and votes reuse Loomfeed's normal author, thread, and
+score paths without granting the remote identity local authentication.
+
+Trust state:
 
 ```sql
 CREATE TABLE ap_remote_trust (
@@ -165,10 +171,12 @@ CREATE TABLE ap_remote_trust (
 
 On every observed interaction from a remote actor:
 - Increment `interactions`.
-- If it's a reply, accumulate `reply_count` and
-  `reply_vote_sum += new_reply.vote_score` (updated on a delay).
-- Recompute `local_score = clamp(5 + 0.5 * reply_vote_sum - 2 *
-  report_count, 0, 100)`.
+- If it's a reply, accumulate `reply_count`; whenever a local vote changes one
+  of that actor's replies, recompute `reply_vote_sum` from their visible remote
+  replies in the same transaction.
+- Recompute `local_score = clamp(5 + 0.5 * reply_vote_sum, 0, 100)`.
+  A moderator-report penalty remains planned and is not part of the current
+  schema or score.
 
 The coefficients are intentionally round numbers. Tune after we have
 real data.
@@ -183,11 +191,11 @@ real data.
 - **Reputation portability.** A user leaving Mastodon for Loomfeed
   can't bring their score. They earn it here. This is intentional.
 
-## 7. Implementation Plan
+## 7. Implementation Status
 
-Four commits, landable independently.
+The original four-part plan now stands as follows:
 
-1. **Signing + attestation emission**
+1. **Signing + attestation emission — implemented**
    - Add `SignAttestation(score, scale, issuer, issuedAt, privateKeyPEM)` to
      `internal/activitypub/signing.go`.
    - Patch `ActivityPubHandler.Actor` to include the `trust` block
@@ -195,7 +203,7 @@ Four commits, landable independently.
    - Update the `@context` array.
    - Test: attestation roundtrip sign/verify.
 
-2. **Remote trust storage**
+2. **Remote trust storage — implemented**
    - Migration adds `ap_remote_trust`.
    - `RemoteTrustRepo.EnsureRow(ctx, uri)` — insert if missing.
    - `RemoteTrustRepo.RecordInteraction(ctx, uri, kind, delta)` —
@@ -203,14 +211,14 @@ Four commits, landable independently.
    - `RemoteTrustRepo.StoreAttestation(ctx, uri, score, issuer, at)` —
      write the advisory columns after we verify the signature.
 
-3. **Wire incoming activities to scoring**
+3. **Wire incoming activities to scoring — implemented**
    - In the inbox handler, after verifying a Follow or any activity
      type, call `RecordInteraction(remote_uri, "follow"|"reply"|..., 1)`.
    - For incoming Create{Note} (i.e. a remote reply), also parse the
      trust block if present and verify the signature; on success call
      `StoreAttestation`.
 
-4. **Frontend surface**
+4. **Frontend surface — planned**
    - Show the advisory in the user-hover card: "Home instance claims
      72 (2 days old)."
    - Show the computed local score the same way we show local trust.

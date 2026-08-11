@@ -88,11 +88,11 @@ func (r *VoteRepo) CastVote(ctx context.Context, v *models.Vote) (int, error) {
 		// Combined: vote_score + upvote_count + downvote_count in one UPDATE
 		err = tx.QueryRow(ctx, `
 			UPDATE comments
-			SET vote_score = COALESCE(
-				(SELECT SUM(CASE WHEN direction = 'up' THEN 1 ELSE -1 END)
-				 FROM votes WHERE target_id = $1 AND target_type = $2), 0),
-			    upvote_count = (SELECT COUNT(*) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'up'),
-			    downvote_count = (SELECT COUNT(*) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'down')
+			SET vote_score = ROUND(COALESCE(
+				(SELECT SUM(CASE WHEN direction = 'up' THEN weight ELSE -weight END)
+				 FROM votes WHERE target_id = $1 AND target_type = $2), 0))::integer,
+			    upvote_count = ROUND(COALESCE((SELECT SUM(weight) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'up'), 0))::integer,
+			    downvote_count = ROUND(COALESCE((SELECT SUM(weight) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'down'), 0))::integer
 			WHERE id = $1
 			RETURNING vote_score`,
 			v.TargetID, v.TargetType,
@@ -100,9 +100,9 @@ func (r *VoteRepo) CastVote(ctx context.Context, v *models.Vote) (int, error) {
 	} else {
 		err = tx.QueryRow(ctx, `
 			UPDATE posts
-			SET vote_score = COALESCE(
-				(SELECT SUM(CASE WHEN direction = 'up' THEN 1 ELSE -1 END)
-				 FROM votes WHERE target_id = $1 AND target_type = $2), 0)
+			SET vote_score = ROUND(COALESCE(
+				(SELECT SUM(CASE WHEN direction = 'up' THEN weight ELSE -weight END)
+				 FROM votes WHERE target_id = $1 AND target_type = $2), 0))::integer
 			WHERE id = $1
 			RETURNING vote_score`,
 			v.TargetID, v.TargetType,
@@ -110,6 +110,9 @@ func (r *VoteRepo) CastVote(ctx context.Context, v *models.Vote) (int, error) {
 	}
 	if err != nil {
 		return 0, fmt.Errorf("recalculate vote_score: %w", err)
+	}
+	if _, err := recomputeRemoteReplyTrustTx(ctx, tx, v.TargetID, v.TargetType); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -175,11 +178,11 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	if v.TargetType == models.TargetComment {
 		err = tx.QueryRow(ctx, `
 			UPDATE comments
-			SET vote_score = COALESCE(
-				(SELECT SUM(CASE WHEN direction = 'up' THEN 1 ELSE -1 END)
-				 FROM votes WHERE target_id = $1 AND target_type = $2), 0),
-			    upvote_count = (SELECT COUNT(*) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'up'),
-			    downvote_count = (SELECT COUNT(*) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'down')
+			SET vote_score = ROUND(COALESCE(
+				(SELECT SUM(CASE WHEN direction = 'up' THEN weight ELSE -weight END)
+				 FROM votes WHERE target_id = $1 AND target_type = $2), 0))::integer,
+			    upvote_count = ROUND(COALESCE((SELECT SUM(weight) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'up'), 0))::integer,
+			    downvote_count = ROUND(COALESCE((SELECT SUM(weight) FROM votes WHERE target_id = $1 AND target_type = 'comment' AND direction = 'down'), 0))::integer
 			WHERE id = $1
 			RETURNING vote_score`,
 			v.TargetID, v.TargetType,
@@ -187,9 +190,9 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	} else {
 		err = tx.QueryRow(ctx, `
 			UPDATE posts
-			SET vote_score = COALESCE(
-				(SELECT SUM(CASE WHEN direction = 'up' THEN 1 ELSE -1 END)
-				 FROM votes WHERE target_id = $1 AND target_type = $2), 0)
+			SET vote_score = ROUND(COALESCE(
+				(SELECT SUM(CASE WHEN direction = 'up' THEN weight ELSE -weight END)
+				 FROM votes WHERE target_id = $1 AND target_type = $2), 0))::integer
 			WHERE id = $1
 			RETURNING vote_score`,
 			v.TargetID, v.TargetType,
@@ -198,6 +201,10 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	if err != nil {
 		return 0, fmt.Errorf("recalculate vote_score: %w", err)
 	}
+	isRemoteReply, err := recomputeRemoteReplyTrustTx(ctx, tx, v.TargetID, v.TargetType)
+	if err != nil {
+		return 0, err
+	}
 
 	// Step 4: Reputation update for the content author. Uses the
 	// shared uncapped formula in ApplyReputationEventTx so vote-driven
@@ -205,7 +212,7 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	// refutations, etc.). The legacy scoreDelta arg is ignored — the
 	// canonical magnitude is keyed off eventType.
 	_ = scoreDelta // legacy arg, kept for signature stability
-	if authorID != "" && authorID != v.VoterID {
+	if authorID != "" && authorID != v.VoterID && !isRemoteReply {
 		if _, err := ApplyReputationEventTx(ctx, tx, authorID, eventType); err != nil {
 			return 0, err
 		}
@@ -216,6 +223,51 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	}
 
 	return newScore, nil
+}
+
+// recomputeRemoteReplyTrustTx feeds the locally observed reception of a
+// federated reply back into that actor's Loomfeed-local trust score. The
+// target check makes this a no-op for posts and ordinary local comments.
+// Keeping the trust row and its materialized remote participant in this vote
+// transaction prevents either view of the actor from lagging behind.
+func recomputeRemoteReplyTrustTx(ctx context.Context, tx pgx.Tx, targetID string, targetType models.TargetType) (bool, error) {
+	if targetType != models.TargetComment {
+		return false, nil
+	}
+	var isRemoteReply bool
+	err := tx.QueryRow(ctx, `
+		WITH remote_actor AS (
+			SELECT federated_actor_uri
+			FROM comments
+			WHERE id = $1 AND federated_actor_uri IS NOT NULL
+		), aggregate AS (
+			SELECT c.federated_actor_uri, COALESCE(SUM(c.vote_score), 0)::integer AS reply_vote_sum
+			FROM comments c
+			JOIN remote_actor ra ON ra.federated_actor_uri = c.federated_actor_uri
+			WHERE c.deleted_at IS NULL
+			GROUP BY c.federated_actor_uri
+		), updated_trust AS (
+			UPDATE ap_remote_trust rt
+			SET reply_vote_sum = aggregate.reply_vote_sum,
+				local_score = LEAST(100, GREATEST(0, 5 + 0.5 * aggregate.reply_vote_sum))
+			FROM aggregate
+			WHERE rt.remote_actor_uri = aggregate.federated_actor_uri
+			RETURNING rt.remote_actor_uri, rt.local_score
+		), updated_participant AS (
+			UPDATE participants p
+			SET trust_score = updated_trust.local_score,
+				reputation_score = updated_trust.local_score,
+				updated_at = NOW()
+			FROM updated_trust
+			JOIN ap_remote_actors ra ON ra.actor_uri = updated_trust.remote_actor_uri
+			WHERE p.id = ra.participant_id
+			RETURNING p.id
+		)
+		SELECT EXISTS (SELECT 1 FROM remote_actor)`, targetID).Scan(&isRemoteReply)
+	if err != nil {
+		return false, fmt.Errorf("recompute remote reply trust: %w", err)
+	}
+	return isRemoteReply, nil
 }
 
 // GetUserVotesForPosts returns a map of post_id → vote direction for the given user.

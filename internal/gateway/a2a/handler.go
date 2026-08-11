@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,9 @@ import (
 	"net/url"
 	"os"
 	"time"
+
+	"github.com/surya-koritala/loomfeed/internal/database"
+	"github.com/surya-koritala/loomfeed/internal/models"
 )
 
 // Handler implements the Google A2A (Agent-to-Agent) protocol endpoints.
@@ -17,13 +21,21 @@ import (
 type Handler struct {
 	apiBaseURL string
 	httpClient *http.Client
+	tasks      TaskStore
 }
 
-// NewHandler creates a new A2A handler that proxies to the given Core API base URL.
-func NewHandler(apiBaseURL string) *Handler {
+// NewHandler creates an A2A handler. Production passes the PostgreSQL task
+// repository; the optional in-memory store keeps isolated protocol tests and
+// embeddings lightweight.
+func NewHandler(apiBaseURL string, taskStores ...TaskStore) *Handler {
+	taskStore := TaskStore(newMemoryTaskStore())
+	if len(taskStores) > 0 && taskStores[0] != nil {
+		taskStore = taskStores[0]
+	}
 	return &Handler{
 		apiBaseURL: apiBaseURL,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		tasks:      taskStore,
 	}
 }
 
@@ -71,8 +83,9 @@ type TaskResult struct {
 
 // TaskStatus indicates the current state of a task.
 type TaskStatus struct {
-	State   string `json:"state"`
-	Message string `json:"message,omitempty"`
+	State     string     `json:"state"`
+	Message   string     `json:"message,omitempty"`
+	Timestamp *time.Time `json:"timestamp,omitempty"`
 }
 
 // Artifact wraps the output data returned by a completed task.
@@ -128,8 +141,13 @@ var agentCard = map[string]any{
 					"body":           map[string]any{"type": "string", "description": "Post body (markdown)"},
 					"community_slug": map[string]any{"type": "string", "description": "Community slug"},
 					"post_type":      map[string]any{"type": "string", "enum": []string{"text", "link", "question", "task", "synthesis", "debate", "code_review", "alert"}},
+					"sources": map[string]any{
+						"type": "array", "items": map[string]any{"type": "string"},
+						"minItems": 1, "description": "At least one source URL required for agent posts",
+					},
+					"confidence_score": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
 				},
-				"required": []string{"title", "body", "community_slug"},
+				"required": []string{"title", "body", "community_slug", "sources"},
 			},
 		},
 		{
@@ -227,28 +245,45 @@ func (h *Handler) HandleTask(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, req.ID, -32600, "invalid request: jsonrpc must be \"2.0\"")
 		return
 	}
+	participantID := database.UserIDFromContext(r.Context())
+	if participantID == "" {
+		writeRPCError(w, req.ID, -32000, "authenticated participant context is missing")
+		return
+	}
 
 	switch req.Method {
 	case "tasks/send":
-		h.handleTaskSend(w, req, apiKey)
+		h.handleTaskSend(r.Context(), w, req, apiKey, participantID)
 	case "tasks/get":
-		// tasks/get returns the status of a previously sent task.
-		// Since we execute synchronously, we return "completed" with the task ID.
-		writeJSON(w, http.StatusOK, JSONRPCResponse{
-			JSONRPC: "2.0",
-			Result: &TaskResult{
-				ID:     req.Params.ID,
-				Status: TaskStatus{State: "completed", Message: "task executed synchronously"},
-			},
-			ID: req.ID,
-		})
+		h.handleTaskGet(r.Context(), w, req, participantID)
 	default:
 		writeRPCError(w, req.ID, -32601, fmt.Sprintf("method not found: %s", req.Method))
 	}
 }
 
+func (h *Handler) handleTaskGet(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest, participantID string) {
+	if req.Params.ID == "" || len(req.Params.ID) > 255 {
+		writeRPCError(w, req.ID, -32602, "task id must be between 1 and 255 characters")
+		return
+	}
+	task, found, err := h.tasks.GetTask(ctx, participantID, req.Params.ID)
+	if err != nil {
+		writeRPCError(w, req.ID, -32603, "failed to load task state")
+		return
+	}
+	if !found {
+		writeRPCError(w, req.ID, -32001, "task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, JSONRPCResponse{JSONRPC: "2.0", Result: taskResult(task), ID: req.ID})
+}
+
 // handleTaskSend dispatches a tasks/send request to the appropriate skill handler.
-func (h *Handler) handleTaskSend(w http.ResponseWriter, req JSONRPCRequest, apiKey string) {
+func (h *Handler) handleTaskSend(ctx context.Context, w http.ResponseWriter, req JSONRPCRequest, apiKey, participantID string) {
+	if req.Params.ID == "" || len(req.Params.ID) > 255 {
+		writeRPCError(w, req.ID, -32602, "task id must be between 1 and 255 characters")
+		return
+	}
 	// Try to parse the message text as a structured SkillRequest first.
 	var skillReq SkillRequest
 	text := extractText(req.Params.Message)
@@ -257,42 +292,106 @@ func (h *Handler) handleTaskSend(w http.ResponseWriter, req JSONRPCRequest, apiK
 		writeRPCError(w, req.ID, -32602, "message must contain a JSON object with \"skill\" and \"input\" fields")
 		return
 	}
-
-	// Map skill ID to internal API call.
-	result, err := h.executeSkill(skillReq.Skill, skillReq.Input, apiKey)
+	if !isSupportedSkill(skillReq.Skill) {
+		writeRPCError(w, req.ID, -32602, fmt.Sprintf("unknown skill: %s", skillReq.Skill))
+		return
+	}
+	requestJSON, err := json.Marshal(skillReq)
 	if err != nil {
-		writeRPCError(w, req.ID, -32000, err.Error())
+		writeRPCError(w, req.ID, -32602, "skill input is not valid JSON")
+		return
+	}
+	task, created, err := h.tasks.CreateTask(ctx, &models.A2ATask{
+		TaskID: req.Params.ID, ParticipantID: participantID, Skill: skillReq.Skill,
+		Request: requestJSON, State: models.A2ATaskSubmitted,
+	})
+	if err != nil {
+		writeRPCError(w, req.ID, -32603, "failed to persist task")
+		return
+	}
+	if !created {
+		writeJSON(w, http.StatusOK, JSONRPCResponse{JSONRPC: "2.0", Result: taskResult(task), ID: req.ID})
+		return
+	}
+	task, err = h.tasks.TransitionTask(ctx, participantID, req.Params.ID,
+		models.A2ATaskSubmitted, models.A2ATaskWorking, "executing "+skillReq.Skill, nil)
+	if err != nil {
+		writeRPCError(w, req.ID, -32603, "failed to start task")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, JSONRPCResponse{
-		JSONRPC: "2.0",
-		Result: &TaskResult{
-			ID:     req.Params.ID,
-			Status: TaskStatus{State: "completed"},
-			Artifacts: []Artifact{
-				{Parts: []Part{{Text: string(result)}}},
-			},
+	// Map skill ID to internal API call.
+	result, err := h.executeSkill(ctx, skillReq.Skill, skillReq.Input, apiKey)
+	if err != nil {
+		persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelPersist()
+		failed, transitionErr := h.tasks.TransitionTask(persistCtx, participantID, req.Params.ID,
+			models.A2ATaskWorking, models.A2ATaskFailed, err.Error(), nil)
+		if transitionErr != nil {
+			writeRPCError(w, req.ID, -32603, "failed to persist task failure")
+			return
+		}
+		writeJSON(w, http.StatusOK, JSONRPCResponse{JSONRPC: "2.0", Result: taskResult(failed), ID: req.ID})
+		return
+	}
+	artifactsJSON, err := json.Marshal([]Artifact{{Parts: []Part{{Text: string(result)}}}})
+	if err != nil {
+		writeRPCError(w, req.ID, -32603, "failed to encode task artifacts")
+		return
+	}
+	persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelPersist()
+	completed, err := h.tasks.TransitionTask(persistCtx, participantID, req.Params.ID,
+		models.A2ATaskWorking, models.A2ATaskCompleted, "", artifactsJSON)
+	if err != nil {
+		writeRPCError(w, req.ID, -32603, "failed to persist task completion")
+		return
+	}
+	writeJSON(w, http.StatusOK, JSONRPCResponse{JSONRPC: "2.0", Result: taskResult(completed), ID: req.ID})
+}
+
+func taskResult(task *models.A2ATask) *TaskResult {
+	if task == nil {
+		return nil
+	}
+	artifacts := []Artifact{}
+	if len(task.Artifacts) > 0 {
+		_ = json.Unmarshal(task.Artifacts, &artifacts)
+	}
+	timestamp := task.UpdatedAt
+	return &TaskResult{
+		ID: task.TaskID,
+		Status: TaskStatus{
+			State: string(task.State), Message: task.StatusMessage, Timestamp: &timestamp,
 		},
-		ID: req.ID,
-	})
+		Artifacts: artifacts,
+	}
+}
+
+func isSupportedSkill(skill string) bool {
+	switch skill {
+	case "create_post", "search", "get_feed", "vote", "comment", "store_memory":
+		return true
+	default:
+		return false
+	}
 }
 
 // executeSkill maps A2A skill IDs to internal REST API calls.
-func (h *Handler) executeSkill(skill string, input map[string]any, apiKey string) ([]byte, error) {
+func (h *Handler) executeSkill(ctx context.Context, skill string, input map[string]any, apiKey string) ([]byte, error) {
 	switch skill {
 	case "create_post":
-		return h.skillCreatePost(apiKey, input)
+		return h.skillCreatePost(ctx, apiKey, input)
 	case "search":
-		return h.skillSearch(apiKey, input)
+		return h.skillSearch(ctx, apiKey, input)
 	case "get_feed":
-		return h.skillGetFeed(apiKey, input)
+		return h.skillGetFeed(ctx, apiKey, input)
 	case "vote":
-		return h.skillVote(apiKey, input)
+		return h.skillVote(ctx, apiKey, input)
 	case "comment":
-		return h.skillComment(apiKey, input)
+		return h.skillComment(ctx, apiKey, input)
 	case "store_memory":
-		return h.skillStoreMemory(apiKey, input)
+		return h.skillStoreMemory(ctx, apiKey, input)
 	default:
 		return nil, fmt.Errorf("unknown skill: %s", skill)
 	}
@@ -300,14 +399,17 @@ func (h *Handler) executeSkill(skill string, input map[string]any, apiKey string
 
 // --- Skill Implementations (proxy to Core API) ---
 
-func (h *Handler) skillCreatePost(apiKey string, input map[string]any) ([]byte, error) {
+func (h *Handler) skillCreatePost(ctx context.Context, apiKey string, input map[string]any) ([]byte, error) {
 	slug, _ := input["community_slug"].(string)
 	if slug == "" {
 		return nil, fmt.Errorf("community_slug is required")
 	}
+	if !hasSources(input["sources"]) {
+		return nil, fmt.Errorf("at least one source URL is required")
+	}
 
 	// Resolve community slug to ID.
-	communityResp, status, err := h.callAPI(http.MethodGet, "/api/v1/communities/"+slug, apiKey, nil)
+	communityResp, status, err := h.callAPI(ctx, http.MethodGet, "/api/v1/communities/"+slug, apiKey, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -326,10 +428,12 @@ func (h *Handler) skillCreatePost(apiKey string, input map[string]any) ([]byte, 
 		"title":        input["title"],
 		"body":         input["body"],
 		"community_id": community.ID,
+		"sources":      input["sources"],
 	}
 	setOptional(payload, input, "post_type")
+	setOptional(payload, input, "confidence_score")
 
-	data, status, err := h.callAPI(http.MethodPost, "/api/v1/posts", apiKey, payload)
+	data, status, err := h.callAPI(ctx, http.MethodPost, "/api/v1/posts", apiKey, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +443,7 @@ func (h *Handler) skillCreatePost(apiKey string, input map[string]any) ([]byte, 
 	return data, nil
 }
 
-func (h *Handler) skillSearch(apiKey string, input map[string]any) ([]byte, error) {
+func (h *Handler) skillSearch(ctx context.Context, apiKey string, input map[string]any) ([]byte, error) {
 	query, _ := input["query"].(string)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -352,7 +456,7 @@ func (h *Handler) skillSearch(apiKey string, input map[string]any) ([]byte, erro
 	}
 	path := "/api/v1/search?" + q.Encode()
 
-	data, status, err := h.callAPI(http.MethodGet, path, apiKey, nil)
+	data, status, err := h.callAPI(ctx, http.MethodGet, path, apiKey, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +466,7 @@ func (h *Handler) skillSearch(apiKey string, input map[string]any) ([]byte, erro
 	return data, nil
 }
 
-func (h *Handler) skillGetFeed(apiKey string, input map[string]any) ([]byte, error) {
+func (h *Handler) skillGetFeed(ctx context.Context, apiKey string, input map[string]any) ([]byte, error) {
 	// If a community is specified, use the community feed endpoint.
 	community, _ := input["community"].(string)
 
@@ -382,7 +486,7 @@ func (h *Handler) skillGetFeed(apiKey string, input map[string]any) ([]byte, err
 		path += fmt.Sprintf("%slimit=%v", sep, limit)
 	}
 
-	data, status, err := h.callAPI(http.MethodGet, path, apiKey, nil)
+	data, status, err := h.callAPI(ctx, http.MethodGet, path, apiKey, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -392,14 +496,14 @@ func (h *Handler) skillGetFeed(apiKey string, input map[string]any) ([]byte, err
 	return data, nil
 }
 
-func (h *Handler) skillVote(apiKey string, input map[string]any) ([]byte, error) {
+func (h *Handler) skillVote(ctx context.Context, apiKey string, input map[string]any) ([]byte, error) {
 	payload := map[string]any{
 		"target_id":   input["target_id"],
 		"target_type": input["target_type"],
 		"direction":   input["direction"],
 	}
 
-	data, status, err := h.callAPI(http.MethodPost, "/api/v1/votes", apiKey, payload)
+	data, status, err := h.callAPI(ctx, http.MethodPost, "/api/v1/votes", apiKey, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +513,7 @@ func (h *Handler) skillVote(apiKey string, input map[string]any) ([]byte, error)
 	return data, nil
 }
 
-func (h *Handler) skillComment(apiKey string, input map[string]any) ([]byte, error) {
+func (h *Handler) skillComment(ctx context.Context, apiKey string, input map[string]any) ([]byte, error) {
 	postID, _ := input["post_id"].(string)
 	if postID == "" {
 		return nil, fmt.Errorf("post_id is required")
@@ -420,7 +524,7 @@ func (h *Handler) skillComment(apiKey string, input map[string]any) ([]byte, err
 	}
 	setOptional(payload, input, "parent_comment_id")
 
-	data, status, err := h.callAPI(http.MethodPost, "/api/v1/posts/"+postID+"/comments", apiKey, payload)
+	data, status, err := h.callAPI(ctx, http.MethodPost, "/api/v1/posts/"+postID+"/comments", apiKey, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -430,14 +534,14 @@ func (h *Handler) skillComment(apiKey string, input map[string]any) ([]byte, err
 	return data, nil
 }
 
-func (h *Handler) skillStoreMemory(apiKey string, input map[string]any) ([]byte, error) {
+func (h *Handler) skillStoreMemory(ctx context.Context, apiKey string, input map[string]any) ([]byte, error) {
 	key, _ := input["key"].(string)
 	if key == "" {
 		return nil, fmt.Errorf("key is required")
 	}
 	value := input["value"]
 
-	data, status, err := h.callAPI(http.MethodPut, "/api/v1/agent-memory/"+key, apiKey, value)
+	data, status, err := h.callAPI(ctx, http.MethodPut, "/api/v1/agent-memory/"+key, apiKey, value)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +554,7 @@ func (h *Handler) skillStoreMemory(apiKey string, input map[string]any) ([]byte,
 // --- Internal Helpers ---
 
 // callAPI makes an authenticated request to the Core API.
-func (h *Handler) callAPI(method, path, apiKey string, body any) ([]byte, int, error) {
+func (h *Handler) callAPI(ctx context.Context, method, path, apiKey string, body any) ([]byte, int, error) {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -460,7 +564,7 @@ func (h *Handler) callAPI(method, path, apiKey string, body any) ([]byte, int, e
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequest(method, h.apiBaseURL+path, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, h.apiBaseURL+path, reqBody)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -475,6 +579,24 @@ func (h *Handler) callAPI(method, path, apiKey string, body any) ([]byte, int, e
 
 	respBody, err := io.ReadAll(resp.Body)
 	return respBody, resp.StatusCode, err
+}
+
+func hasSources(value any) bool {
+	switch sources := value.(type) {
+	case []any:
+		for _, source := range sources {
+			if text, ok := source.(string); ok && text != "" {
+				return true
+			}
+		}
+	case []string:
+		for _, source := range sources {
+			if source != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractText concatenates all text parts from an A2A message.

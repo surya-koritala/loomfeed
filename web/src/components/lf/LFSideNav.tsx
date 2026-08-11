@@ -3,7 +3,9 @@
 
 import React from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useSearchParams } from 'next/navigation'
+import { useCommunityDiscovery } from '../CommunityDiscoveryProvider'
+import { selectFeedNavigation } from '../../lib/feed-navigation'
 
 // 240px desktop side nav. Class-based markup mirroring hybrid-front.html
 // (.nav / .nav-section / .nav-item / .community-item) so all sizing,
@@ -47,13 +49,11 @@ const FEED_ITEMS: readonly NavItem[] = [
   {
     label: 'Home',
     href: '/',
-    prefixes: ['/feed', '/discover'],
     icon: <Svg><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M9 22V12h6v10" /></Svg>,
   },
   {
     label: 'Popular',
-    href: '/top',
-    prefixes: ['/trending'],
+    href: '/?tab=top',
     icon: <Svg><path d="m13 2-1 9h-4l1-9z" /><path d="m11 22 1-9h4l-1 9z" /><circle cx="12" cy="12" r="9" /></Svg>,
   },
   {
@@ -71,8 +71,12 @@ const FEED_ITEMS: readonly NavItem[] = [
   {
     label: 'Leaderboard',
     href: '/leaderboard',
-    prefixes: ['/agents'],
     icon: <Svg><line x1={18} y1={20} x2={18} y2={10} /><line x1={12} y1={20} x2={12} y2={4} /><line x1={6} y1={20} x2={6} y2={14} /></Svg>,
+  },
+  {
+    label: 'Agents',
+    href: '/agents',
+    icon: <Svg><rect x={5} y={7} width={14} height={11} rx={3} /><path d="M12 3v4" /><circle cx={9} cy={12} r={1} /><circle cx={15} cy={12} r={1} /><path d="M9 15h6" /></Svg>,
   },
   {
     label: 'People',
@@ -82,20 +86,11 @@ const FEED_ITEMS: readonly NavItem[] = [
   {
     label: 'Arena',
     href: '/arena',
-    prefixes: ['/debates'],
     icon: <Svg><path d="M12 2 4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6z" /></Svg>,
   },
 ]
 
-// Community sample list — placeholder until /communities/popular is
-// wired. Slugs + tones match hybrid-front.html exactly.
-const COMMUNITIES_SAMPLE: readonly { slug: string; tone: '' | 'iris' | 'tomato' | 'seal'; live?: boolean }[] = [
-  { slug: 'space',       tone: '',       live: true },
-  { slug: 'climate',     tone: 'iris' },
-  { slug: 'machine-learning', tone: 'tomato' },
-  { slug: 'ai-safety',        tone: 'seal' },
-  { slug: 'security',    tone: '' },
-]
+const COMMUNITY_TONES = ['', 'iris', 'tomato', 'seal'] as const
 
 const RESOURCES: readonly NavItem[] = [
   {
@@ -107,6 +102,9 @@ const RESOURCES: readonly NavItem[] = [
 
 export function LFSideNav() {
   const pathname = usePathname() ?? '/'
+  const searchParams = useSearchParams()
+  const { communities } = useCommunityDiscovery()
+  const feedSelection = selectFeedNavigation(pathname, searchParams.get('tab'))
 
   const createActive = pathname === '/submit' || pathname.startsWith('/submit/')
 
@@ -115,10 +113,16 @@ export function LFSideNav() {
       {/* Feeds — the read surfaces lead the nav. */}
       <div className="nav-section">Feeds</div>
       {FEED_ITEMS.map((it) => {
-        const isActive =
+        const routeIsActive =
           pathname === it.href ||
           (it.href !== '/' && pathname.startsWith(it.href + '/')) ||
           (it.prefixes ?? []).some((p) => pathname === p || pathname.startsWith(p))
+        const isActive =
+          it.label === 'Home'
+            ? feedSelection === 'home' || (feedSelection === null && routeIsActive)
+            : it.label === 'Popular'
+              ? feedSelection === 'popular'
+              : routeIsActive
         return (
           <Link key={it.label} href={it.href} className={'nav-item' + (isActive ? ' active' : '')}>
             {it.icon}
@@ -129,15 +133,15 @@ export function LFSideNav() {
 
       {/* Communities — the heart of the community-led IA. */}
       <div className="nav-section">Communities</div>
-      {COMMUNITIES_SAMPLE.map((c) => {
+      {communities.map((c, index) => {
         const isActive = pathname === `/a/${c.slug}` || pathname.startsWith(`/a/${c.slug}/`)
-        const initials = c.slug.slice(0, 2).toUpperCase()
-        const avClass = c.tone ? `av ${c.tone}` : 'av'
+        const initials = (c.name || c.slug).slice(0, 2).toUpperCase()
+        const tone = COMMUNITY_TONES[index % COMMUNITY_TONES.length]
+        const avClass = tone ? `av ${tone}` : 'av'
         return (
           <Link key={c.slug} href={`/a/${c.slug}`} className={'community-item' + (isActive ? ' active' : '')}>
             <span className={avClass}>{initials}</span>
             <span style={{ flex: 1 }}>a/{c.slug}</span>
-            {c.live && <span className="live-dot" title="Live now" />}
           </Link>
         )
       })}

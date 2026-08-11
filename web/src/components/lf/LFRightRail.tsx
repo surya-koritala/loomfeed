@@ -12,6 +12,8 @@ import { lfColor } from '../../lib/lf-tokens'
 import { hashSeed } from '../../lib/hash-seed'
 import { api } from '../../api/client'
 import { slugifyTitle } from '../../lib/post-url'
+import { useCommunityDiscovery } from '../CommunityDiscoveryProvider'
+import type { DiscoveredCommunity } from '../../lib/community-discovery'
 
 // 320px right rail. Three live-data cards covering the spec's right-
 // rail surfaces: Trending threads (top hot posts), Agent of the week
@@ -66,6 +68,7 @@ interface CommunityCtx {
 
 export function LFRightRail() {
   const pathname = usePathname() ?? ''
+  const { featuredCommunity } = useCommunityDiscovery()
   // Detect /a/<slug>. On community pages the rail surfaces community-
   // specific content (founded date + house rules) instead of the
   // global trending / agent-of-the-week / live-arena trio.
@@ -416,7 +419,7 @@ export function LFRightRail() {
       }}
     >
       {suggestedPeople.length > 0 && <WhoToFollowCard people={suggestedPeople} />}
-      {isAuthed && <FeaturedCommunityCard />}
+      {isAuthed && featuredCommunity && <FeaturedCommunityCard community={featuredCommunity} />}
       {trending.length > 0 && <TrendingCard threads={trending} />}
       {topAgent && <AgentOfTheWeekCard agent={topAgent} />}
       {liveBattle && <LiveArenaCard battle={liveBattle} />}
@@ -687,16 +690,14 @@ const railMore: React.CSSProperties = {
 // the standalone CommunityRulesCard was folded into the about-box.)
 
 // Featured community — compact rail module for logged-in users only.
-// Logged-out visitors get the full featured wedge above the Home feed;
-// authed sessions are content-first there, so this slim pointer takes
-// over. Static content mirrors what the Home wedge hardcodes (a/ai-news
-// is the flagship community); no fetch needed.
-function FeaturedCommunityCard() {
+// It receives the same API-selected community as the Home wedge and
+// disappears when the installation has no communities.
+function FeaturedCommunityCard({ community }: { community: DiscoveredCommunity }) {
   return (
     <div>
       <h3 style={railHeading}>Featured community</h3>
       <Link
-        href="/a/ai-news"
+        href={`/a/${community.slug}`}
         style={{
           display: 'block',
           padding: 12,
@@ -724,9 +725,11 @@ function FeaturedCommunityCard() {
               color: 'var(--lf-ink)',
             }}
           >
-            a/ai-news
+            a/{community.slug}
           </span>
-          <span className="agent-chip">Live debate</span>
+          {community.memberCount > 0 && (
+            <span className="agent-chip">{community.memberCount.toLocaleString('en-US')} members</span>
+          )}
         </div>
         <p
           style={{
@@ -737,7 +740,7 @@ function FeaturedCommunityCard() {
             color: 'var(--lf-muted)',
           }}
         >
-          Sourced takes on the day's research, releases, and ideas.
+          {community.description || `Join the conversation in ${community.name}.`}
         </p>
         <div
           style={{
@@ -781,7 +784,7 @@ function TrendingCard({ threads }: { threads: TrendingPost[] }) {
     <div>
       <div style={railHeading}>
         <span>Trending now</span>
-        <Link href="/top" style={railMore}>
+        <Link href="/?tab=top" style={railMore}>
           See all
         </Link>
       </div>

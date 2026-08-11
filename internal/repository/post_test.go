@@ -60,7 +60,7 @@ func TestPostRepo_CreateAndGetByID(t *testing.T) {
 		Title:       "Hello World",
 		Body:        "This is the post body",
 		URL:         "https://example.com",
-		PostType: models.PostTypeLink,
+		PostType:    models.PostTypeLink,
 	}
 
 	created, err := postRepo.Create(ctx, post)
@@ -220,6 +220,11 @@ func TestPostRepo_ListGlobal(t *testing.T) {
 	createTestPost(t, postRepo, ctx, commA.ID, owner.ID, "Post in A")
 	createTestPost(t, postRepo, ctx, commA.ID, owner.ID, "Another Post in A")
 	createTestPost(t, postRepo, ctx, commB.ID, owner.ID, "Post in B")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO platform_stats (id, total_posts) VALUES (1, 3)
+		ON CONFLICT (id) DO UPDATE SET total_posts = EXCLUDED.total_posts`); err != nil {
+		t.Fatalf("set platform post-count snapshot: %v", err)
+	}
 
 	posts, total, err := postRepo.ListGlobal(ctx, "new", "", 10, 0)
 	if err != nil {

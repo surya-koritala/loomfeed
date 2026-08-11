@@ -35,7 +35,7 @@ const sportsMatchColumns = `id, ext_id, competition, stage, group_name,
        home_team, home_code, home_crest, away_team, away_code, away_crest,
        kickoff_utc, status, home_score, away_score, venue, settled_at,
        espn_event_id, lineups,
-       (SELECT COUNT(*) FROM sports_predictions sp
+       (SELECT COUNT(*) FROM predictions sp
          WHERE sp.match_id = sports_matches.id AND sp.predictor_kind = 'agent')::int AS prediction_count`
 
 func scanSportsMatch(row pgx.Row, m *models.SportsMatch) error {
@@ -162,14 +162,22 @@ func (r *SportsRepo) LiveOrImminent(ctx context.Context, d time.Duration) (bool,
 // insert path and the conflict-update path re-check kickoff_utc > now().
 func (r *SportsRepo) UpsertPrediction(ctx context.Context, p *models.SportsPrediction) error {
 	tag, err := r.pool.Exec(ctx, `
-		INSERT INTO sports_predictions (match_id, participant_id, predictor_kind,
-		                                home_prob, draw_prob, away_prob, pick, reasoning)
-		SELECT m.id, $2, $3, $4, $5, $6, $7, $8 FROM sports_matches m
+		INSERT INTO predictions (match_id, participant_id, predictor_kind,
+		                         home_prob, draw_prob, away_prob, pick, reasoning,
+		                         subject, predicted_outcome, confidence, resolve_by)
+		SELECT m.id, $2, $3, $4::real, $5::real, $6::real, $7, $8,
+		       CONCAT_WS(' vs ', m.home_team, m.away_team), $7,
+		       COALESCE(GREATEST($4::real, $5::real, $6::real), (1.0 / 3.0)::real),
+		       m.kickoff_utc
+		FROM sports_matches m
 		WHERE m.id = $1 AND m.kickoff_utc > now()
 		ON CONFLICT (match_id, participant_id) DO UPDATE
 			SET home_prob = EXCLUDED.home_prob, draw_prob = EXCLUDED.draw_prob,
 			    away_prob = EXCLUDED.away_prob, pick = EXCLUDED.pick,
-			    reasoning = EXCLUDED.reasoning, updated_at = now()
+			    reasoning = EXCLUDED.reasoning, subject = EXCLUDED.subject,
+			    predicted_outcome = EXCLUDED.predicted_outcome,
+			    confidence = EXCLUDED.confidence, resolve_by = EXCLUDED.resolve_by,
+			    updated_at = now()
 			WHERE (SELECT kickoff_utc FROM sports_matches WHERE id = EXCLUDED.match_id) > now()`,
 		p.MatchID, p.ParticipantID, p.PredictorKind,
 		p.HomeProb, p.DrawProb, p.AwayProb, p.Pick, p.Reasoning,
@@ -205,9 +213,9 @@ func (r *SportsRepo) ListPredictions(ctx context.Context, matchID string, limit,
 		       COALESCE(st.n, 0), COALESCE(st.correct, 0),
 		       CASE WHEN sp.predictor_kind = 'agent' AND COALESCE(st.n, 0) > 0
 		            THEN (st.brier_sum / st.n)::float8 END
-		FROM sports_predictions sp
+		FROM predictions sp
 		LEFT JOIN participants p ON p.id = sp.participant_id
-		LEFT JOIN sports_prediction_stats st ON st.participant_id = sp.participant_id
+		LEFT JOIN prediction_stats st ON st.participant_id = sp.participant_id
 		WHERE sp.match_id = $1
 		ORDER BY CASE WHEN sp.predictor_kind = 'agent' THEN 0 ELSE 1 END,
 		         sp.created_at DESC
@@ -249,7 +257,7 @@ func (r *SportsRepo) PredictionAggregates(ctx context.Context, matchID, viewerID
 		       AVG(home_prob) FILTER (WHERE predictor_kind = 'agent'),
 		       AVG(draw_prob) FILTER (WHERE predictor_kind = 'agent'),
 		       AVG(away_prob) FILTER (WHERE predictor_kind = 'agent')
-		FROM sports_predictions
+		FROM predictions
 		WHERE match_id = $1`,
 		matchID,
 	).Scan(&home, &draw, &away, &total, &avgHome, &avgDraw, &avgAway)
@@ -278,7 +286,7 @@ func (r *SportsRepo) PredictionAggregates(ctx context.Context, matchID, viewerID
 			SELECT id, match_id, participant_id, predictor_kind,
 			       home_prob::float8, draw_prob::float8, away_prob::float8,
 			       pick, reasoning, outcome, brier::float8, created_at
-			FROM sports_predictions
+			FROM predictions
 			WHERE match_id = $1 AND participant_id = $2`,
 			matchID, viewerID,
 		).Scan(
@@ -346,11 +354,13 @@ func (r *SportsRepo) SettleMatch(ctx context.Context, matchID string) error {
 	}
 
 	rows, err := tx.Query(ctx, `
-		UPDATE sports_predictions SET
+		UPDATE predictions SET
 			outcome = CASE WHEN pick = $2 THEN 'correct' ELSE 'wrong' END,
+			resolution = $2,
 			brier = CASE WHEN home_prob IS NOT NULL AND draw_prob IS NOT NULL AND away_prob IS NOT NULL
 			        THEN power(home_prob - $3::float8, 2) + power(draw_prob - $4::float8, 2) + power(away_prob - $5::float8, 2)
 			        END,
+			resolved_at = now(),
 			updated_at = now()
 		WHERE match_id = $1 AND outcome IS NULL
 		RETURNING participant_id, predictor_kind, outcome, brier::float8`,
@@ -406,18 +416,18 @@ func (r *SportsRepo) SettleMatch(ctx context.Context, matchID string) error {
 			}
 		}
 		_, err = tx.Exec(ctx, `
-			INSERT INTO sports_prediction_stats
+			INSERT INTO prediction_stats
 				(participant_id, predictor_kind, n, correct, brier_sum, streak)
 			SELECT unnest($1::uuid[]), unnest($2::text[]), 1,
 			       unnest($3::int[]), unnest($4::float8[]), unnest($5::int[])
 			ON CONFLICT (participant_id) DO UPDATE SET
 				predictor_kind = EXCLUDED.predictor_kind,
-				n = sports_prediction_stats.n + 1,
-				correct = sports_prediction_stats.correct + EXCLUDED.correct,
-				brier_sum = sports_prediction_stats.brier_sum + EXCLUDED.brier_sum,
+				n = prediction_stats.n + 1,
+				correct = prediction_stats.correct + EXCLUDED.correct,
+				brier_sum = prediction_stats.brier_sum + EXCLUDED.brier_sum,
 				streak = CASE WHEN EXCLUDED.correct = 1
-				              THEN GREATEST(sports_prediction_stats.streak, 0) + 1
-				              ELSE LEAST(sports_prediction_stats.streak, 0) - 1 END,
+				              THEN GREATEST(prediction_stats.streak, 0) + 1
+				              ELSE LEAST(prediction_stats.streak, 0) - 1 END,
 				updated_at = now()`,
 			ids, kinds, corrects, briers, streaks,
 		)
@@ -441,6 +451,38 @@ func (r *SportsRepo) SettleMatch(ctx context.Context, matchID string) error {
 	return nil
 }
 
+// SettleMatchParticipants settles a match and returns the participants whose
+// previously-unsettled predictions were graded by this call. The sports
+// poller uses the IDs to trigger scorecard recomputation without changing the
+// long-standing SettleMatch API used by other callers.
+func (r *SportsRepo) SettleMatchParticipants(ctx context.Context, matchID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT participant_id::text
+		FROM predictions
+		WHERE match_id = $1 AND outcome IS NULL
+		ORDER BY participant_id`, matchID)
+	if err != nil {
+		return nil, fmt.Errorf("list unsettled sports predictors: %w", err)
+	}
+	var participantIDs []string
+	for rows.Next() {
+		var participantID string
+		if err := rows.Scan(&participantID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan unsettled sports predictor: %w", err)
+		}
+		participantIDs = append(participantIDs, participantID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unsettled sports predictors: %w", err)
+	}
+	if err := r.SettleMatch(ctx, matchID); err != nil {
+		return nil, err
+	}
+	return participantIDs, nil
+}
+
 // Leaderboard returns participants ranked by accuracy. kind filters by
 // predictor_kind ("" = all); minN hides small samples.
 func (r *SportsRepo) Leaderboard(ctx context.Context, kind string, minN, limit int) ([]models.SportsLeaderboardRow, error) {
@@ -451,7 +493,7 @@ func (r *SportsRepo) Leaderboard(ctx context.Context, kind string, minN, limit i
 		       CASE WHEN s.predictor_kind = 'agent' AND s.n > 0
 		            THEN (s.brier_sum / s.n)::float8 END as avg_brier,
 		       s.streak
-		FROM sports_prediction_stats s
+		FROM prediction_stats s
 		LEFT JOIN participants p ON p.id = s.participant_id
 		WHERE s.n >= $1 AND ($2 = '' OR s.predictor_kind = $2)
 		ORDER BY accuracy DESC, s.n DESC, s.participant_id
@@ -517,7 +559,7 @@ func (r *SportsRepo) HumansVsAgents(ctx context.Context) (map[string]any, error)
 
 	rows, err := r.pool.Query(ctx, `
 		SELECT predictor_kind, COUNT(*), COUNT(*) FILTER (WHERE outcome = 'correct')
-		FROM sports_predictions
+		FROM predictions
 		WHERE outcome IS NOT NULL
 		GROUP BY predictor_kind`,
 	)
@@ -664,7 +706,7 @@ const sportsTakeColumns = `
 	       p.display_name, sp.pick, sp.outcome
 	FROM sports_agent_takes t
 	JOIN participants p ON p.id = t.participant_id
-	LEFT JOIN sports_predictions sp ON sp.match_id = t.match_id AND sp.participant_id = t.participant_id`
+	LEFT JOIN predictions sp ON sp.match_id = t.match_id AND sp.participant_id = t.participant_id`
 
 func scanSportsTake(row pgx.Row, t *models.SportsAgentTake) error {
 	return row.Scan(

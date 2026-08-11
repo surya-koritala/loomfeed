@@ -2,11 +2,16 @@ package a2a
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/surya-koritala/loomfeed/internal/database"
 )
 
 // newMockCoreAPI creates a test HTTP server that stubs Core API responses.
@@ -64,11 +69,39 @@ func TestHandler_AgentCard(t *testing.T) {
 	if auth["apiKeyHeader"] != "X-API-Key" {
 		t.Errorf("apiKeyHeader = %v, want X-API-Key", auth["apiKeyHeader"])
 	}
+
+	capabilities, ok := card["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatal("capabilities field missing")
+	}
+	if capabilities["streaming"] != false || capabilities["pushNotifications"] != false {
+		t.Fatalf("agent card must not advertise unsupported streaming/push: %#v", capabilities)
+	}
+
+	createPost, ok := skills[0].(map[string]any)
+	if !ok || createPost["id"] != "create_post" {
+		t.Fatalf("first advertised skill is not create_post: %#v", skills[0])
+	}
+	inputSchema, _ := createPost["inputSchema"].(map[string]any)
+	required, _ := inputSchema["required"].([]any)
+	hasSources := false
+	for _, field := range required {
+		if field == "sources" {
+			hasSources = true
+		}
+	}
+	if !hasSources {
+		t.Fatalf("create_post is unusable for agents unless sources is required: %#v", required)
+	}
 }
 
 // --- Task Send Tests ---
 
 func sendTask(t *testing.T, h *Handler, apiKey string, rpcReq JSONRPCRequest) *httptest.ResponseRecorder {
+	return sendTaskAs(t, h, apiKey, "test-agent", rpcReq)
+}
+
+func sendTaskAs(t *testing.T, h *Handler, apiKey, participantID string, rpcReq JSONRPCRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(rpcReq)
 	if err != nil {
@@ -80,6 +113,7 @@ func sendTask(t *testing.T, h *Handler, apiKey string, rpcReq JSONRPCRequest) *h
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	}
+	req = req.WithContext(database.WithUserID(req.Context(), participantID))
 
 	rec := httptest.NewRecorder()
 	h.HandleTask(rec, req)
@@ -142,6 +176,52 @@ func TestHandler_HandleTask_Search(t *testing.T) {
 	}
 	if len(resp.Result.Artifacts) != 1 {
 		t.Fatalf("artifacts count = %d, want 1", len(resp.Result.Artifacts))
+	}
+
+	getRec := sendTask(t, h, "test-key", JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/get", Params: TaskParams{ID: "task-001"}, ID: 2,
+	})
+	var getResp JSONRPCResponse
+	if err := json.NewDecoder(getRec.Body).Decode(&getResp); err != nil {
+		t.Fatalf("decode tasks/get response: %v", err)
+	}
+	if getResp.Error != nil || getResp.Result == nil || getResp.Result.Status.State != "completed" || len(getResp.Result.Artifacts) != 1 {
+		t.Fatalf("tasks/get did not return persisted completion: %#v", getResp)
+	}
+}
+
+func TestHandler_HandleTask_CreatePostForwardsRequiredSources(t *testing.T) {
+	var postBody map[string]any
+	mock := newMockCoreAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/communities/science":
+			_, _ = w.Write([]byte(`{"id":"community-1"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/posts":
+			_ = json.NewDecoder(r.Body).Decode(&postBody)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"post-1"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer mock.Close()
+	h := NewHandler(mock.URL)
+	skillJSON, _ := json.Marshal(SkillRequest{Skill: "create_post", Input: map[string]any{
+		"title": "Evidence", "body": "Source-backed body", "community_slug": "science",
+		"sources": []string{"https://example.com/source"}, "confidence_score": 0.9,
+	}})
+	rec := sendTask(t, h, "test-key", JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/send",
+		Params: TaskParams{ID: "task-create-post", Message: Message{Role: "user", Parts: []Part{{Text: string(skillJSON)}}}}, ID: 1,
+	})
+	var resp JSONRPCResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error != nil || resp.Result == nil || resp.Result.Status.State != "completed" {
+		t.Fatalf("source-backed create_post failed: %#v", resp)
+	}
+	sources, ok := postBody["sources"].([]any)
+	if !ok || len(sources) != 1 || sources[0] != "https://example.com/source" || postBody["confidence_score"] != 0.9 {
+		t.Fatalf("create_post did not forward provenance inputs: %#v", postBody)
 	}
 }
 
@@ -458,17 +538,157 @@ func TestHandler_HandleTask_TasksGet(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	if resp.Error == nil || resp.Error.Code != -32001 {
+		t.Fatalf("unknown task should return task-not-found, got %#v", resp)
 	}
-	if resp.Result == nil {
-		t.Fatal("expected non-nil result")
+}
+
+func TestHandler_TaskFailureIsPersistedAndTruthful(t *testing.T) {
+	mock := newMockCoreAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"upstream unavailable"}`, http.StatusServiceUnavailable)
+	})
+	defer mock.Close()
+	h := NewHandler(mock.URL)
+	skillJSON, _ := json.Marshal(SkillRequest{Skill: "search", Input: map[string]any{"query": "failure"}})
+
+	sendRec := sendTask(t, h, "test-key", JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/send",
+		Params: TaskParams{ID: "task-failed", Message: Message{Role: "user", Parts: []Part{{Text: string(skillJSON)}}}}, ID: 1,
+	})
+	var sendResp JSONRPCResponse
+	_ = json.NewDecoder(sendRec.Body).Decode(&sendResp)
+	if sendResp.Error != nil || sendResp.Result == nil || sendResp.Result.Status.State != "failed" {
+		t.Fatalf("tasks/send must return a failed task for execution failure: %#v", sendResp)
 	}
-	if resp.Result.ID != "task-existing" {
-		t.Errorf("result ID = %q, want task-existing", resp.Result.ID)
+
+	getRec := sendTask(t, h, "test-key", JSONRPCRequest{JSONRPC: "2.0", Method: "tasks/get", Params: TaskParams{ID: "task-failed"}, ID: 2})
+	var getResp JSONRPCResponse
+	_ = json.NewDecoder(getRec.Body).Decode(&getResp)
+	if getResp.Error != nil || getResp.Result == nil || getResp.Result.Status.State != "failed" || !strings.Contains(getResp.Result.Status.Message, "503") {
+		t.Fatalf("tasks/get must preserve the real failure: %#v", getResp)
 	}
-	if resp.Result.Status.State != "completed" {
-		t.Errorf("status = %q, want completed", resp.Result.Status.State)
+}
+
+func TestHandler_DuplicateTaskIDDoesNotRepeatSideEffects(t *testing.T) {
+	var calls atomic.Int32
+	mock := newMockCoreAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	})
+	defer mock.Close()
+	h := NewHandler(mock.URL)
+	skillJSON, _ := json.Marshal(SkillRequest{Skill: "search", Input: map[string]any{"query": "idempotent"}})
+	req := JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/send",
+		Params: TaskParams{ID: "task-idempotent", Message: Message{Role: "user", Parts: []Part{{Text: string(skillJSON)}}}}, ID: 1,
+	}
+	first := sendTask(t, h, "test-key", req)
+	second := sendTask(t, h, "test-key", req)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("duplicate task executed %d times; first=%s second=%s", calls.Load(), first.Body.String(), second.Body.String())
+	}
+}
+
+func TestHandler_TasksGetObservesWorkingState(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mock := newMockCoreAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	})
+	defer mock.Close()
+	h := NewHandler(mock.URL)
+	skillJSON, _ := json.Marshal(SkillRequest{Skill: "search", Input: map[string]any{"query": "slow"}})
+	reqBody, _ := json.Marshal(JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/send",
+		Params: TaskParams{ID: "task-working", Message: Message{Role: "user", Parts: []Part{{Text: string(skillJSON)}}}}, ID: 1,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/a2a", bytes.NewReader(reqBody))
+	req.Header.Set("X-API-Key", "test-key")
+	req = req.WithContext(database.WithUserID(context.Background(), "test-agent"))
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.HandleTask(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task never entered the working state")
+	}
+	getRec := sendTask(t, h, "test-key", JSONRPCRequest{JSONRPC: "2.0", Method: "tasks/get", Params: TaskParams{ID: "task-working"}, ID: 2})
+	var getResp JSONRPCResponse
+	_ = json.NewDecoder(getRec.Body).Decode(&getResp)
+	if getResp.Error != nil || getResp.Result == nil || getResp.Result.Status.State != "working" {
+		t.Fatalf("tasks/get must expose in-flight work: %#v", getResp)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task did not complete after release")
+	}
+}
+
+func TestHandler_CanceledRequestStillPersistsFailedTerminalState(t *testing.T) {
+	started := make(chan struct{})
+	mock := newMockCoreAPI(t, func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	})
+	defer mock.Close()
+	h := NewHandler(mock.URL)
+	skillJSON, _ := json.Marshal(SkillRequest{Skill: "search", Input: map[string]any{"query": "cancel"}})
+	reqBody, _ := json.Marshal(JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/send",
+		Params: TaskParams{ID: "task-canceled-request", Message: Message{Role: "user", Parts: []Part{{Text: string(skillJSON)}}}}, ID: 1,
+	})
+	requestCtx, cancelRequest := context.WithCancel(database.WithUserID(context.Background(), "test-agent"))
+	req := httptest.NewRequest(http.MethodPost, "/a2a", bytes.NewReader(reqBody)).WithContext(requestCtx)
+	req.Header.Set("X-API-Key", "test-key")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.HandleTask(rec, req)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task never reached the upstream call")
+	}
+	cancelRequest()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled task handler did not finish")
+	}
+
+	getRec := sendTask(t, h, "test-key", JSONRPCRequest{JSONRPC: "2.0", Method: "tasks/get", Params: TaskParams{ID: "task-canceled-request"}, ID: 2})
+	var getResp JSONRPCResponse
+	_ = json.NewDecoder(getRec.Body).Decode(&getResp)
+	if getResp.Error != nil || getResp.Result == nil || getResp.Result.Status.State != "failed" {
+		t.Fatalf("canceled request left a non-terminal task: %#v", getResp)
+	}
+}
+
+func TestHandler_TasksAreScopedToAuthenticatedParticipant(t *testing.T) {
+	mock := newMockCoreAPI(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"results":[]}`)) })
+	defer mock.Close()
+	h := NewHandler(mock.URL)
+	skillJSON, _ := json.Marshal(SkillRequest{Skill: "search", Input: map[string]any{"query": "private"}})
+	sendTaskAs(t, h, "key-a", "agent-a", JSONRPCRequest{
+		JSONRPC: "2.0", Method: "tasks/send",
+		Params: TaskParams{ID: "private-task", Message: Message{Role: "user", Parts: []Part{{Text: string(skillJSON)}}}}, ID: 1,
+	})
+	getRec := sendTaskAs(t, h, "key-b", "agent-b", JSONRPCRequest{JSONRPC: "2.0", Method: "tasks/get", Params: TaskParams{ID: "private-task"}, ID: 2})
+	var getResp JSONRPCResponse
+	_ = json.NewDecoder(getRec.Body).Decode(&getResp)
+	if getResp.Error == nil || getResp.Error.Code != -32001 {
+		t.Fatalf("cross-participant task lookup must be indistinguishable from missing: %#v", getResp)
 	}
 }
 

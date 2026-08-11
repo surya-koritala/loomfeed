@@ -18,7 +18,7 @@ func intPtr(i int) *int       { return &i }
 // sportsLiveTables is the cleanup set for live-center tests.
 var sportsLiveTables = []string{
 	"sports_agent_takes", "sports_match_events",
-	"sports_predictions", "sports_prediction_stats",
+	"predictions", "prediction_stats",
 	"sports_matches", "participants",
 }
 
@@ -256,7 +256,8 @@ func TestSportsRepo_TakeJoinsPrediction(t *testing.T) {
 		t.Fatalf("UpsertPrediction: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
-		UPDATE sports_predictions SET outcome = 'correct'
+		UPDATE predictions
+		SET outcome = 'correct', resolution = predicted_outcome, resolved_at = NOW()
 		WHERE match_id = $1 AND participant_id = $2`, matchID, agent1.ID); err != nil {
 		t.Fatalf("set outcome: %v", err)
 	}
@@ -593,11 +594,11 @@ func TestSportsRepo_MatchesToEnrich(t *testing.T) {
 		}
 	}
 
-	seed(7001, "IN_PLAY", now.Add(-30*time.Minute))           // live → included
-	seed(7002, "TIMED", now.Add(time.Hour))                   // kicks off in 1h → included
-	seed(7003, "FINISHED", now.Add(-150*time.Minute))         // ended 2.5h after kickoff → included
-	seed(7004, "FINISHED", now.Add(-26*time.Hour))            // long over → excluded
-	seed(7005, "TIMED", now.Add(26*time.Hour))                // far future → excluded
+	seed(7001, "IN_PLAY", now.Add(-30*time.Minute))   // live → included
+	seed(7002, "TIMED", now.Add(time.Hour))           // kicks off in 1h → included
+	seed(7003, "FINISHED", now.Add(-150*time.Minute)) // ended 2.5h after kickoff → included
+	seed(7004, "FINISHED", now.Add(-26*time.Hour))    // long over → excluded
+	seed(7005, "TIMED", now.Add(26*time.Hour))        // far future → excluded
 
 	matches, err := repo.MatchesToEnrich(ctx)
 	if err != nil {

@@ -17,7 +17,6 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/auth"
 	"github.com/surya-koritala/loomfeed/internal/cache"
 	"github.com/surya-koritala/loomfeed/internal/config"
-	"github.com/surya-koritala/loomfeed/internal/feed"
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 )
@@ -165,10 +164,10 @@ func (h *FeedHandler) populateUserVotes(ctx context.Context, posts []models.Post
 // (descending from len → 1) so the global ranked_score order is
 // preserved as the baseline. Boosts are added on top:
 //
-//   follow      +len * 0.50   (followed-author posts land near page top)
-//   subscribe   +len * 0.25   (subscribed-community posts surface in the
-//                              upper third even when their global rank is low)
-//   stacks      followed AND subscribed → strongest signal
+//	follow      +len * 0.50   (followed-author posts land near page top)
+//	subscribe   +len * 0.25   (subscribed-community posts surface in the
+//	                           upper third even when their global rank is low)
+//	stacks      followed AND subscribed → strongest signal
 //
 // Within the same boost tier the input order is preserved via
 // stable sort, so two followed posts keep their original relative
@@ -316,14 +315,15 @@ func (h *FeedHandler) Global(w http.ResponseWriter, r *http.Request) {
 	postType := r.URL.Query().Get("type")
 	limit := parseIntQuery(r, "limit", 25)
 	offset := parseIntQuery(r, "offset", 0)
-	cursor := r.URL.Query().Get("cursor")
+	rawCursor := r.URL.Query().Get("cursor")
+	cursor := decodeCursorID(rawCursor)
 
 	// Build cache subkey from query params. The "feed" namespace
 	// version is appended by the cache layer; bumping it via
 	// BumpVersion("feed") invalidates every key here in O(1).
 	cacheKey := fmt.Sprintf("global:%s:%d:%d:%s", sort, limit, offset, postType)
-	if cursor != "" {
-		cacheKey = fmt.Sprintf("global:%s:%d:c:%s:%s", sort, limit, cursor, postType)
+	if rawCursor != "" {
+		cacheKey = fmt.Sprintf("global:%s:%d:c:%s:%s", sort, limit, rawCursor, postType)
 	}
 
 	claims := middleware.GetClaims(r.Context())
@@ -396,13 +396,6 @@ func (h *FeedHandler) writeFeedResponse(w http.ResponseWriter, ctx context.Conte
 	h.populateUserVotes(ctx, resp.Data, claims.ParticipantID)
 	h.populateUserBookmarks(ctx, resp.Data, claims.ParticipantID)
 	h.populateViewerFollowing(ctx, resp.Data, claims.ParticipantID)
-	resp.HasMore = resp.Offset+resp.Limit < resp.Total
-	if len(resp.Data) > 0 {
-		resp.NextCursor = resp.Data[len(resp.Data)-1].ID
-	} else {
-		resp.NextCursor = ""
-	}
-
 	out, err := json.Marshal(resp)
 	if err != nil {
 		_, _ = w.Write(base)
@@ -432,20 +425,11 @@ func (h *FeedHandler) fetchAndCacheBaseFeed(ctx context.Context, cacheKey, sort,
 	var err error
 
 	switch {
-	case (sort == "for_you" || sort == "hot") && cursor == "":
-		// 8x candidate pool gives Diversify real headroom to mix
-		// communities, authors, and (after Tier 2) per-user
-		// affinities. Was 2x, which left only ~5 swap candidates
-		// past the requested page — Diversify could enforce its
-		// streak rules but couldn't introduce novelty that wasn't
-		// already in the global top N. At ~57k posts the 200-row
-		// fetch is still <20ms on the materialized ranked_score
-		// index.
-		candidateCount := limit * 8
-		posts, total, err = h.posts.ListGlobalRanked(ctx, postType, candidateCount, offset)
-		if err == nil && len(posts) > limit {
-			posts = feed.Diversify(posts, limit)
-		}
+	case sort == "for_you" || sort == "hot":
+		// Cursor pages must consume one contiguous ranking window. Selecting
+		// a subset from a larger diversity pool would either repeat omitted
+		// candidates or skip them permanently on the next request.
+		posts, total, err = h.posts.ListGlobalRanked(ctx, postType, limit, offset, cursor)
 	case sort == "live":
 		posts, total, err = h.posts.ListGlobalLive(ctx, postType, limit, offset)
 	default:
@@ -460,11 +444,12 @@ func (h *FeedHandler) fetchAndCacheBaseFeed(ctx context.Context, cacheKey, sort,
 		Total:       total,
 		Limit:       limit,
 		Offset:      offset,
-		HasMore:     offset+limit < total,
+		HasMore:     len(posts) == limit,
 		RetrievedAt: time.Now(),
 	}
-	if len(posts) > 0 {
-		resp.NextCursor = posts[len(posts)-1].ID
+	if sort != "live" && resp.HasMore && len(posts) > 0 {
+		last := posts[len(posts)-1]
+		resp.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
 	}
 
 	data, err := json.Marshal(resp)
@@ -491,7 +476,7 @@ func (h *FeedHandler) Subscribed(w http.ResponseWriter, r *http.Request) {
 	postType := r.URL.Query().Get("type")
 	limit := parseIntQuery(r, "limit", 25)
 	offset := parseIntQuery(r, "offset", 0)
-	cursor := r.URL.Query().Get("cursor")
+	cursor := decodeCursorID(r.URL.Query().Get("cursor"))
 
 	// Subscribed feed is per-user — not cacheable.
 
@@ -526,20 +511,11 @@ func (h *FeedHandler) Subscribed(w http.ResponseWriter, r *http.Request) {
 		followedIDs, _ = h.follows.GetFollowingIDs(r.Context(), claims.ParticipantID)
 	}
 
-	fetchLimit := limit
-	if sort == "hot" && cursor == "" {
-		fetchLimit = limit * 2
-	}
-
 	posts, total, err := h.posts.ListBySubscriptionsAndFollows(
-		r.Context(), claims.ParticipantID, followedIDs, sort, postType, fetchLimit, offset, cursor)
+		r.Context(), claims.ParticipantID, followedIDs, sort, postType, limit, offset, cursor)
 	if err != nil {
 		api.Error(w, http.StatusInternalServerError, "failed to fetch feed")
 		return
-	}
-
-	if sort == "hot" && cursor == "" && len(posts) > limit {
-		posts = feed.Diversify(posts, limit)
 	}
 
 	// Populate user vote and bookmark state
@@ -553,12 +529,13 @@ func (h *FeedHandler) Subscribed(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Limit:       limit,
 		Offset:      offset,
-		HasMore:     offset+limit < total,
+		HasMore:     len(posts) == limit,
 		RetrievedAt: time.Now(),
 	}
 
-	if len(posts) > 0 {
-		resp.NextCursor = posts[len(posts)-1].ID
+	if resp.HasMore && len(posts) > 0 {
+		last := posts[len(posts)-1]
+		resp.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
 	}
 
 	api.JSON(w, http.StatusOK, resp)
@@ -589,11 +566,12 @@ func (h *FeedHandler) ByCommunity(w http.ResponseWriter, r *http.Request) {
 	postType := r.URL.Query().Get("type")
 	limit := parseIntQuery(r, "limit", 25)
 	offset := parseIntQuery(r, "offset", 0)
-	cursor := r.URL.Query().Get("cursor")
+	rawCursor := r.URL.Query().Get("cursor")
+	cursor := decodeCursorID(rawCursor)
 
-	cacheKey := fmt.Sprintf("community:%s:%s:%d:%d", slug, sort, limit, offset)
-	if cursor != "" {
-		cacheKey = fmt.Sprintf("community:%s:%s:%d:c:%s", slug, sort, limit, cursor)
+	cacheKey := fmt.Sprintf("community:%s:%s:%d:%d:%s", slug, sort, limit, offset, postType)
+	if rawCursor != "" {
+		cacheKey = fmt.Sprintf("community:%s:%s:%d:c:%s:%s", slug, sort, limit, rawCursor, postType)
 	}
 
 	// Cache only for unauthenticated users
@@ -625,12 +603,13 @@ func (h *FeedHandler) ByCommunity(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Limit:       limit,
 		Offset:      offset,
-		HasMore:     offset+limit < total,
+		HasMore:     len(posts) == limit,
 		RetrievedAt: time.Now(),
 	}
 
-	if len(posts) > 0 {
-		resp.NextCursor = posts[len(posts)-1].ID
+	if resp.HasMore && len(posts) > 0 {
+		last := posts[len(posts)-1]
+		resp.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
 	}
 
 	if h.cache != nil && commClaims == nil {
@@ -673,11 +652,12 @@ func (h *FeedHandler) ByTag(w http.ResponseWriter, r *http.Request) {
 	postType := r.URL.Query().Get("type")
 	limit := parseIntQuery(r, "limit", 25)
 	offset := parseIntQuery(r, "offset", 0)
-	cursor := r.URL.Query().Get("cursor")
+	rawCursor := r.URL.Query().Get("cursor")
+	cursor := decodeCursorID(rawCursor)
 
-	cacheKey := fmt.Sprintf("tag:%s:%s:%d:%d", tag, sort, limit, offset)
-	if cursor != "" {
-		cacheKey = fmt.Sprintf("tag:%s:%s:%d:c:%s", tag, sort, limit, cursor)
+	cacheKey := fmt.Sprintf("tag:%s:%s:%d:%d:%s", tag, sort, limit, offset, postType)
+	if rawCursor != "" {
+		cacheKey = fmt.Sprintf("tag:%s:%s:%d:c:%s:%s", tag, sort, limit, rawCursor, postType)
 	}
 
 	claims := middleware.GetClaims(r.Context())
@@ -707,11 +687,12 @@ func (h *FeedHandler) ByTag(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		Limit:       limit,
 		Offset:      offset,
-		HasMore:     offset+limit < total,
+		HasMore:     len(posts) == limit,
 		RetrievedAt: time.Now(),
 	}
-	if len(posts) > 0 {
-		resp.NextCursor = posts[len(posts)-1].ID
+	if resp.HasMore && len(posts) > 0 {
+		last := posts[len(posts)-1]
+		resp.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
 	}
 
 	if h.cache != nil && claims == nil {

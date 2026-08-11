@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net/mail"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -11,22 +13,23 @@ type Config struct {
 	Environment string
 	LogLevel    string
 
-	API         APIConfig
-	Gateway     GatewayConfig
-	DB          DatabaseConfig
-	Redis       RedisConfig
-	JWT         JWTConfig
-	OAuth       OAuthConfig
-	Email       EmailConfig
+	API            APIConfig
+	Gateway        GatewayConfig
+	DB             DatabaseConfig
+	Redis          RedisConfig
+	JWT            JWTConfig
+	OAuth          OAuthConfig
+	Email          EmailConfig
 	TenorAPIKey    string
 	GoogleClientID string
-	LLM             LLMConfig
-	Uploads         UploadsConfig
-	Push            PushConfig
-	IndexNow        IndexNowConfig
-	CuratedShorts   CuratedShortsConfig
-	Sports          SportsConfig
-	Auth            AuthConfig
+	LLM            LLMConfig
+	Uploads        UploadsConfig
+	Push           PushConfig
+	IndexNow       IndexNowConfig
+	CuratedShorts  CuratedShortsConfig
+	Sports         SportsConfig
+	Auth           AuthConfig
+	Federation     FederationConfig
 	// LoomDeployment names the Azure OpenAI deployment used by the
 	// @loom AI summon path specifically. Defaults to gpt-5.4-mini
 	// (cheap, fast — right tier for short summaries). Falls back to
@@ -41,6 +44,13 @@ type Config struct {
 // off without touching code — fast rollback path during the rollout.
 type AuthConfig struct {
 	CookieIssuance bool
+}
+
+// FederationConfig gates every public ActivityPub route and outbound
+// delivery hook. It defaults off so a self-hosted instance does not expose or
+// contact the fediverse until its operator has configured a public SITE_URL.
+type FederationConfig struct {
+	Enabled bool
 }
 
 // CuratedShortsConfig gates the external-shorts ingest pipeline. An
@@ -113,6 +123,11 @@ type LLMConfig struct {
 type EmailConfig struct {
 	ACSConnectionString string
 	ACSEmailDomain      string
+	SMTPHost            string
+	SMTPPort            string
+	SMTPUsername        string
+	SMTPPassword        string
+	SMTPFrom            string
 	SiteURL             string
 }
 
@@ -150,6 +165,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid JWT_EXPIRY: %w", err)
 	}
+	federationEnabled, err := strconv.ParseBool(strings.TrimSpace(getEnv("FEDERATION_ENABLED", "false")))
+	if err != nil {
+		return nil, fmt.Errorf("invalid FEDERATION_ENABLED: %w", err)
+	}
 
 	return &Config{
 		Environment: getEnv("ENVIRONMENT", "development"),
@@ -180,6 +199,11 @@ func Load() (*Config, error) {
 		Email: EmailConfig{
 			ACSConnectionString: getEnv("ACS_CONNECTION_STRING", ""),
 			ACSEmailDomain:      getEnv("ACS_EMAIL_DOMAIN", ""),
+			SMTPHost:            getEnv("SMTP_HOST", ""),
+			SMTPPort:            getEnv("SMTP_PORT", "587"),
+			SMTPUsername:        getEnv("SMTP_USERNAME", ""),
+			SMTPPassword:        getEnv("SMTP_PASSWORD", ""),
+			SMTPFrom:            getEnv("SMTP_FROM", ""),
 			SiteURL:             getEnv("SITE_URL", "http://localhost:3000"),
 		},
 		TenorAPIKey:    getEnv("TENOR_API_KEY", ""),
@@ -212,6 +236,7 @@ func Load() (*Config, error) {
 			// Set to "false" to roll back without redeploy.
 			CookieIssuance: getEnv("AUTH_COOKIE_ISSUANCE", "true") != "false",
 		},
+		Federation: FederationConfig{Enabled: federationEnabled},
 		Uploads: UploadsConfig{
 			Enabled: getEnv("UPLOADS_ENABLED", "") == "true",
 			ContentSafety: ContentSafetyConfig{
@@ -229,6 +254,23 @@ func (c *Config) Validate() error {
 	}
 	if c.DB.URL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if c.Email.SMTPHost != "" {
+		if c.Email.SMTPFrom == "" {
+			return fmt.Errorf("SMTP_FROM is required when SMTP_HOST is set")
+		}
+		if _, err := mail.ParseAddress(c.Email.SMTPFrom); err != nil {
+			return fmt.Errorf("invalid SMTP_FROM: %w", err)
+		}
+		port, err := strconv.Atoi(c.Email.SMTPPort)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("SMTP_PORT must be a number between 1 and 65535")
+		}
+		if (c.Email.SMTPUsername == "") != (c.Email.SMTPPassword == "") {
+			return fmt.Errorf("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+		}
+	} else if c.Email.SMTPUsername != "" || c.Email.SMTPPassword != "" || c.Email.SMTPFrom != "" {
+		return fmt.Errorf("SMTP_HOST is required when SMTP credentials or SMTP_FROM are set")
 	}
 	return nil
 }

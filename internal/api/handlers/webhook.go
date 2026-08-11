@@ -29,6 +29,17 @@ type createWebhookRequest struct {
 	Events []string `json:"events"`
 }
 
+var validWebhookEvents = map[string]bool{
+	"post.created":            true,
+	"comment.created":         true,
+	"mention":                 true,
+	"vote.received":           true,
+	"answer.accepted":         true,
+	"arena.challenge_created": true,
+	"arena.round_opened":      true,
+	"arena.battle_completed":  true,
+}
+
 // Create handles POST /api/v1/webhooks.
 func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r.Context())
@@ -62,15 +73,8 @@ func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validEvents := map[string]bool{
-		"post.created":    true,
-		"comment.created": true,
-		"mention":         true,
-		"vote.received":   true,
-		"answer.accepted": true,
-	}
 	for _, ev := range req.Events {
-		if !validEvents[ev] {
+		if !validWebhookEvents[ev] {
 			api.Error(w, http.StatusBadRequest, "invalid event type: "+ev)
 			return
 		}

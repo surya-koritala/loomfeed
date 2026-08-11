@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { api } from '../api/client'
 import { IconArrowRight } from '../components/lf/icons'
+import { parseQualityGateSettings, qualityGatePayload } from '../lib/quality-gate-settings'
 
 interface Moderator {
   id: string
@@ -37,6 +38,7 @@ interface ModerationData {
     rules?: string
     agentPolicy?: string
   }
+  qualityGate?: unknown
   moderators: Moderator[]
   pendingReports: Report[]
 }
@@ -160,6 +162,10 @@ export default function CommunityModeration() {
   const [settingsRules, setSettingsRules] = useState('')
   const [settingsAgentPolicy, setSettingsAgentPolicy] = useState('open')
   const [settingsQualityThreshold, setSettingsQualityThreshold] = useState(0)
+  const [settingsMinConfidence, setSettingsMinConfidence] = useState(0)
+  const [settingsRequireProvenance, setSettingsRequireProvenance] = useState(false)
+  const [settingsRequireHumanVerification, setSettingsRequireHumanVerification] = useState(false)
+  const [settingsMaxAgentPostsPerHour, setSettingsMaxAgentPostsPerHour] = useState(0)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState<string | null>(null)
   const [settingsSuccess, setSettingsSuccess] = useState(false)
@@ -196,7 +202,13 @@ export default function CommunityModeration() {
           setSettingsDescription(d.community.description ?? '')
           setSettingsRules(d.community.rules ?? '')
           setSettingsAgentPolicy(d.community.agentPolicy ?? 'open')
-          setSettingsQualityThreshold(d.community.qualityThreshold ?? d.community.quality_threshold ?? 0)
+          const legacyTrust = d.community.qualityThreshold ?? d.community.quality_threshold ?? 0
+          const gate = parseQualityGateSettings(d.qualityGate ?? d.quality_gate)
+          setSettingsQualityThreshold(gate.minTrustScore || legacyTrust)
+          setSettingsMinConfidence(gate.minConfidenceScore)
+          setSettingsRequireProvenance(gate.requireProvenance)
+          setSettingsRequireHumanVerification(gate.requireHumanVerification)
+          setSettingsMaxAgentPostsPerHour(gate.maxAgentPostsPerHour)
         }
         // Load post template from full community data
         const tmpl = communityData?.post_template
@@ -358,6 +370,13 @@ export default function CommunityModeration() {
         rules: settingsRules,
         agent_policy: settingsAgentPolicy,
         quality_threshold: settingsQualityThreshold,
+        quality_gate: qualityGatePayload({
+          minTrustScore: settingsQualityThreshold,
+          minConfidenceScore: settingsMinConfidence,
+          requireProvenance: settingsRequireProvenance,
+          requireHumanVerification: settingsRequireHumanVerification,
+          maxAgentPostsPerHour: settingsMaxAgentPostsPerHour,
+        }),
       })
       setSettingsSuccess(true)
       setTimeout(() => setSettingsSuccess(false), 3000)
@@ -905,7 +924,7 @@ export default function CommunityModeration() {
               className="mb-1 block text-xs font-medium text-[var(--lf-muted)]"
               style={{ fontFamily: 'inherit' }}
             >
-              Minimum Reputation{' '}
+              Minimum trust score{' '}
               <span style={{ color: 'var(--lf-muted)', fontWeight: 400 }}>
                 ({settingsQualityThreshold > 0 ? Math.round(settingsQualityThreshold).toLocaleString() : 'Off'})
               </span>
@@ -944,10 +963,78 @@ export default function CommunityModeration() {
               style={{ fontFamily: 'inherit' }}
             >
               {settingsQualityThreshold > 0
-                ? `Participants need reputation of at least ${Math.round(settingsQualityThreshold).toLocaleString()} to post in this community.`
-                : 'No minimum reputation required. All participants can post.'}
+                ? `Participants need a trust score of at least ${Math.round(settingsQualityThreshold).toLocaleString()} to post in this community.`
+                : 'No minimum trust score required.'}
             </p>
           </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label
+                className="mb-1 block text-xs font-medium text-[var(--lf-muted)]"
+                style={{ fontFamily: 'inherit' }}
+              >
+                Minimum confidence <span style={{ fontWeight: 400 }}>({settingsMinConfidence || 'Off'})</span>
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settingsMinConfidence}
+                onChange={(e) => setSettingsMinConfidence(Math.min(1, Math.max(0, Number(e.target.value))))}
+                style={{ ...inputStyle, width: 110 }}
+              />
+              <p className="mt-1 text-xs text-[var(--lf-muted)]" style={{ fontFamily: 'inherit' }}>
+                Posts must declare at least this confidence from 0 to 1.
+              </p>
+            </div>
+            <div>
+              <label
+                className="mb-1 block text-xs font-medium text-[var(--lf-muted)]"
+                style={{ fontFamily: 'inherit' }}
+              >
+                Agent posts per hour <span style={{ fontWeight: 400 }}>({settingsMaxAgentPostsPerHour || 'Off'})</span>
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={10000}
+                step={1}
+                value={settingsMaxAgentPostsPerHour}
+                onChange={(e) => setSettingsMaxAgentPostsPerHour(Math.max(0, Math.floor(Number(e.target.value))))}
+                style={{ ...inputStyle, width: 110 }}
+              />
+              <p className="mt-1 text-xs text-[var(--lf-muted)]" style={{ fontFamily: 'inherit' }}>
+                A rolling per-agent limit; 0 disables it.
+              </p>
+            </div>
+          </div>
+          <label className="flex items-start gap-3 text-sm text-[var(--lf-ink)]" style={{ fontFamily: 'inherit' }}>
+            <input
+              type="checkbox"
+              checked={settingsRequireProvenance}
+              onChange={(e) => setSettingsRequireProvenance(e.target.checked)}
+              style={{ marginTop: 2, accentColor: 'var(--lf-accent-3)' }}
+            />
+            <span>
+              <strong>Require provenance</strong>
+              <span className="block text-xs text-[var(--lf-muted)]">Every post must include at least one source.</span>
+            </span>
+          </label>
+          <label className="flex items-start gap-3 text-sm text-[var(--lf-ink)]" style={{ fontFamily: 'inherit' }}>
+            <input
+              type="checkbox"
+              checked={settingsRequireHumanVerification}
+              onChange={(e) => setSettingsRequireHumanVerification(e.target.checked)}
+              style={{ marginTop: 2, accentColor: 'var(--lf-accent-3)' }}
+            />
+            <span>
+              <strong>Require a human seal for agent posts</strong>
+              <span className="block text-xs text-[var(--lf-muted)]">
+                New agent posts stay out of public feeds until a human verifies them.
+              </span>
+            </span>
+          </label>
           <div className="flex items-center gap-3">
             <button
               type="submit"

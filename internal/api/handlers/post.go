@@ -22,8 +22,8 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/linkpreview"
 	"github.com/surya-koritala/loomfeed/internal/loom"
 	"github.com/surya-koritala/loomfeed/internal/mention"
-	"github.com/surya-koritala/loomfeed/internal/modfilter"
 	"github.com/surya-koritala/loomfeed/internal/models"
+	"github.com/surya-koritala/loomfeed/internal/modfilter"
 	"github.com/surya-koritala/loomfeed/internal/provenance"
 	"github.com/surya-koritala/loomfeed/internal/quality"
 	"github.com/surya-koritala/loomfeed/internal/ratelimit"
@@ -70,24 +70,25 @@ func PrefetchBodyLinkPreviews(posts *repository.PostRepo, postID, body string) {
 
 // PostHandler handles post endpoints.
 type PostHandler struct {
-	posts        *repository.PostRepo
-	provenances  *repository.ProvenanceRepo
-	moderation   *repository.ModerationRepo
-	modActions   *repository.ModActionRepo
-	communities  *repository.CommunityRepo
-	participants *repository.ParticipantRepo
-	reports      *repository.ReportRepo
-	agentSubs    *repository.AgentSubscriptionRepo
-	votes        *repository.VoteRepo
-	mentions      *repository.MentionRepo
-	notifications *repository.NotificationRepo
-	blocks        *repository.BlockRepo
-	account       *repository.AccountRepo
-	follows       *repository.FollowRepo
+	posts          *repository.PostRepo
+	provenances    *repository.ProvenanceRepo
+	moderation     *repository.ModerationRepo
+	modActions     *repository.ModActionRepo
+	communities    *repository.CommunityRepo
+	participants   *repository.ParticipantRepo
+	reports        *repository.ReportRepo
+	agentSubs      *repository.AgentSubscriptionRepo
+	votes          *repository.VoteRepo
+	mentions       *repository.MentionRepo
+	notifications  *repository.NotificationRepo
+	blocks         *repository.BlockRepo
+	account        *repository.AccountRepo
+	follows        *repository.FollowRepo
 	rateLimiter    ratelimit.Limiter
 	cfg            *config.Config
 	cache          *cache.RedisCache
 	qualityChecker *quality.Checker
+	qualityGates   *repository.QualityGateRepo
 	provStats      *provenance.Service
 	apFanout       APFanout
 	indexNow       IndexNowPinger
@@ -97,6 +98,11 @@ type PostHandler struct {
 	// silently skip it until backfill catches up or someone
 	// re-embeds).
 	embedder loom.Embedder
+}
+
+// WithQualityGates enables the schema-backed per-community post policy.
+func (h *PostHandler) WithQualityGates(gates *repository.QualityGateRepo) {
+	h.qualityGates = gates
 }
 
 // WithMentions wires the mention + notification repos so post and
@@ -138,6 +144,15 @@ func (h *PostHandler) WithFollows(f *repository.FollowRepo) {
 // the only way to populate.
 func (h *PostHandler) WithEmbedder(e loom.Embedder) {
 	h.embedder = e
+}
+
+func hasSource(sources []string) bool {
+	for _, source := range sources {
+		if strings.TrimSpace(source) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldQuarantine returns whether a new post from this author
@@ -400,14 +415,7 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// agent is making a claim, it pulled it from somewhere, and that
 	// somewhere is a source.
 	if claims.ParticipantType == string(models.ParticipantAgent) {
-		hasValidSource := false
-		for _, s := range req.Sources {
-			if strings.TrimSpace(s) != "" {
-				hasValidSource = true
-				break
-			}
-		}
-		if !hasValidSource {
+		if !hasSource(req.Sources) {
 			api.Error(w, http.StatusBadRequest, "agent posts must include at least one source URL — pass sources: [\"https://...\"] in the request body")
 			return
 		}
@@ -485,6 +493,63 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Schema-backed community quality policy. Trust, confidence, and
+	// provenance rules apply to every author. The hourly cap and deferred
+	// human seal apply only to agent-authored posts.
+	requiresHumanVerification := false
+	if h.qualityGates != nil {
+		gate, err := h.qualityGates.GetByCommunityID(r.Context(), req.CommunityID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to load community quality gate", err)
+			return
+		}
+		if gate != nil {
+			if gate.MinTrustScore > 0 {
+				if h.participants == nil {
+					api.Error(w, http.StatusServiceUnavailable, "participant trust lookup is not configured")
+					return
+				}
+				author, err := h.participants.GetByID(r.Context(), claims.ParticipantID)
+				if err != nil {
+					api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to look up participant trust", err)
+					return
+				}
+				if author.TrustScore < gate.MinTrustScore {
+					api.Error(w, http.StatusForbidden, fmt.Sprintf(
+						"this community requires a minimum trust score of %.1f (yours: %.1f)",
+						gate.MinTrustScore, author.TrustScore))
+					return
+				}
+			}
+			if gate.MinConfidenceScore > 0 &&
+				(req.ConfidenceScore == nil || *req.ConfidenceScore < gate.MinConfidenceScore) {
+				api.Error(w, http.StatusForbidden, fmt.Sprintf(
+					"this community requires a minimum confidence score of %.2f", gate.MinConfidenceScore))
+				return
+			}
+			if gate.RequireProvenance && !hasSource(req.Sources) {
+				api.Error(w, http.StatusForbidden, "this community requires at least one source for every post")
+				return
+			}
+			if claims.ParticipantType == string(models.ParticipantAgent) {
+				if gate.MaxAgentPostsPerHour > 0 {
+					count, err := h.qualityGates.CountRecentAgentPosts(r.Context(), req.CommunityID, claims.ParticipantID)
+					if err != nil {
+						api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to enforce hourly post limit", err)
+						return
+					}
+					if count >= gate.MaxAgentPostsPerHour {
+						w.Header().Set("Retry-After", "3600")
+						api.Error(w, http.StatusTooManyRequests, fmt.Sprintf(
+							"this community allows at most %d agent posts per hour", gate.MaxAgentPostsPerHour))
+						return
+					}
+				}
+				requiresHumanVerification = gate.RequireHumanVerify
+			}
+		}
+	}
+
 	// Enforce community agent_policy for agent authors
 	if claims.ParticipantType == string(models.ParticipantAgent) && h.communities != nil {
 		community, err := h.communities.GetByID(r.Context(), req.CommunityID)
@@ -557,7 +622,7 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// AND not yet graduated? If yes, the post is hidden from
 	// public feeds until a moderator approves it (or the account
 	// graduates organically).
-	quarantined := shouldQuarantine(r.Context(), h.participants, claims.ParticipantID, claims.ParticipantType)
+	quarantined := requiresHumanVerification || shouldQuarantine(r.Context(), h.participants, claims.ParticipantID, claims.ParticipantType)
 
 	post := &models.Post{
 		CommunityID:     req.CommunityID,

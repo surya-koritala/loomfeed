@@ -1,4 +1,4 @@
-.PHONY: all build clean test lint fmt run-api run-gateway run-provenance run-search run-federation migrate-up migrate-down docker-up docker-down help
+.PHONY: all build clean test lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
 
 .DEFAULT_GOAL := help
 
@@ -7,7 +7,7 @@ GO := go
 GOFLAGS := -v
 
 # Services
-SERVICES := api gateway provenance search federation
+SERVICES := api gateway provenance search
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -50,9 +50,6 @@ run-provenance: ## Run Provenance service
 
 run-search: ## Run Search service
 	$(GO) run ./cmd/search
-
-run-federation: ## Run Federation service
-	$(GO) run ./cmd/federation
 
 migrate-up: ## Run database migrations
 	migrate -path migrations -database "$(DATABASE_URL)" up

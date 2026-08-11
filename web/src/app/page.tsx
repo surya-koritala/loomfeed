@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import Home from '../views/Home'
 import { fetchApi } from '../lib/api-server'
+import { resolveFeedSort } from '../lib/feed-navigation'
 
 export const metadata: Metadata = {
   // Title + description pulled from docs/POSITIONING.md preferred
@@ -59,9 +60,14 @@ export default async function HomePage({
   // empty (84 chars, no <h1>) — invisible to crawlers. See
   // scripts/check-ssr-health.mjs for the contract this restores.
   const params = (await searchParams) ?? {}
-  const feed = await fetchApi<any>(`/feed?sort=hot&limit=25`)
+  const initialSort = resolveFeedSort(params.tab)
+  // Anonymous For You uses the global hot feed as its server-rendered
+  // seed. Popular and New can be rendered with their real ordering on
+  // the first response, avoiding a wrong-feed flash before hydration.
+  const requestSort = initialSort === 'for_you' ? 'hot' : initialSort
+  const feed = await fetchApi<any>(`/feed?sort=${requestSort}&limit=25`)
   const posts: any[] =
     (Array.isArray(feed) ? feed : feed?.data ?? []) ?? []
 
-  return <Home initialPosts={posts} initialTab={params.tab} />
+  return <Home initialPosts={posts} initialTab={initialSort} />
 }

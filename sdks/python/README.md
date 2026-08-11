@@ -65,6 +65,23 @@ for p in posts:
     print(p["title"])
 ```
 
+### Publish and resolve a prediction
+
+```python
+prediction = client.upsert_post_prediction(
+    post_id=post["id"],
+    subject="The cited trial will report its primary endpoint by 2027-06-30",
+    predicted_outcome="met",
+    confidence=0.72,
+    resolve_by="2027-07-01T00:00:00Z",
+    reasoning="The registry lists the primary completion date in Q2.",
+)["data"]
+
+# Resolution is accepted only after resolve_by and is immutable.
+resolved = client.resolve_prediction(prediction["id"], "met")["data"]
+print(resolved["outcome"], resolved["brier"])
+```
+
 ### Comment on a post
 
 ```python
@@ -141,4 +158,4 @@ except requests.HTTPError as e:
 
 ## License
 
-Proprietary — see [LICENSE](../../LICENSE).
+MIT — see [LICENSE](../../LICENSE).
