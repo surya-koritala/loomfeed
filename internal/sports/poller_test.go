@@ -2,19 +2,21 @@ package sports
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/surya-koritala/loomfeed/internal/database"
+	"github.com/surya-koritala/loomfeed/internal/events"
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 )
 
 func TestPollerTick_UpsertsAndSettles(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "sports_predictions", "sports_prediction_stats", "sports_matches", "participants")
+	database.CleanupTables(t, pool, "predictions", "prediction_stats", "sports_matches", "participants")
 
 	ctx := context.Background()
 	repo := repository.NewSportsRepo(pool)
@@ -53,8 +55,12 @@ func TestPollerTick_UpsertsAndSettles(t *testing.T) {
 
 	// Payload says Argentina win 2-1, so a "home" pick must grade correct.
 	_, err = pool.Exec(ctx, `
-		INSERT INTO sports_predictions (match_id, participant_id, predictor_kind, pick)
-		VALUES ($1, $2, 'human', 'home')`,
+		INSERT INTO predictions
+			(match_id, participant_id, predictor_kind, pick, subject,
+			 predicted_outcome, confidence, resolve_by)
+		SELECT $1, $2, 'human', 'home', 'Argentina vs France',
+		       'home', 1.0 / 3.0, kickoff_utc
+		FROM sports_matches WHERE id = $1`,
 		matchID, human.ID,
 	)
 	if err != nil {
@@ -64,7 +70,10 @@ func TestPollerTick_UpsertsAndSettles(t *testing.T) {
 	srv, _, _, _ := newTestdataServer(t)
 	client := NewClient("")
 	client.base = srv.URL
-	p := NewPoller(client, repo)
+	hub := events.NewHub()
+	triggers := hub.Subscribe("__scorecard_worker__")
+	t.Cleanup(func() { hub.Unsubscribe("__scorecard_worker__", triggers) })
+	p := NewPoller(client, repo).WithScorecardTrigger(hub)
 
 	p.tick(ctx)
 
@@ -99,7 +108,7 @@ func TestPollerTick_UpsertsAndSettles(t *testing.T) {
 	// The pre-placed prediction must be graded.
 	var outcome *string
 	if err := pool.QueryRow(ctx,
-		`SELECT outcome FROM sports_predictions WHERE match_id = $1 AND participant_id = $2`,
+		`SELECT outcome FROM predictions WHERE match_id = $1 AND participant_id = $2`,
 		matchID, human.ID,
 	).Scan(&outcome); err != nil {
 		t.Fatalf("get prediction outcome: %v", err)
@@ -109,6 +118,18 @@ func TestPollerTick_UpsertsAndSettles(t *testing.T) {
 	}
 	if *outcome != "correct" {
 		t.Errorf("expected outcome 'correct' for home pick on 2-1, got %q", *outcome)
+	}
+
+	select {
+	case event := <-triggers:
+		var payload struct {
+			ParticipantID string `json:"participant_id"`
+		}
+		if event.Type != "scorecard.trigger" || json.Unmarshal([]byte(event.Data), &payload) != nil || payload.ParticipantID != human.ID {
+			t.Fatalf("scorecard event = %#v payload = %#v", event, payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sports scorecard trigger")
 	}
 }
 

@@ -25,27 +25,29 @@ const (
 
 // ArenaBattle represents a head-to-head debate between two agents.
 type ArenaBattle struct {
-	ID             string      `json:"id"`
-	Topic          string      `json:"topic"`
-	Description    string      `json:"description,omitempty"`
-	AgentAID       string      `json:"agent_a_id"`
-	AgentAName     string      `json:"agent_a_name,omitempty"`
-	AgentBID       string      `json:"agent_b_id"`
-	AgentBName     string      `json:"agent_b_name,omitempty"`
-	Format         ArenaFormat `json:"format"`
-	Status         ArenaStatus `json:"status"`
-	TotalRounds    int         `json:"total_rounds"`
-	CurrentRound   int         `json:"current_round"`
-	RoundTimeLimit int         `json:"round_time_limit"`
-	WordLimit      int         `json:"word_limit"`
-	Rules          string      `json:"rules,omitempty"`
-	TrustStake     float64     `json:"trust_stake"`
-	WinnerID       *string     `json:"winner_id,omitempty"`
-	VoterCount     int         `json:"voter_count"`
-	CreatedBy      string      `json:"created_by"`
-	CreatedByName  string      `json:"created_by_name,omitempty"`
-	CreatedAt      time.Time   `json:"created_at"`
-	CompletedAt    *time.Time  `json:"completed_at,omitempty"`
+	ID             string       `json:"id"`
+	Topic          string       `json:"topic"`
+	Description    string       `json:"description,omitempty"`
+	AgentAID       string       `json:"agent_a_id"`
+	AgentAName     string       `json:"agent_a_name,omitempty"`
+	AgentBID       string       `json:"agent_b_id"`
+	AgentBName     string       `json:"agent_b_name,omitempty"`
+	Format         ArenaFormat  `json:"format"`
+	Status         ArenaStatus  `json:"status"`
+	TotalRounds    int          `json:"total_rounds"`
+	CurrentRound   int          `json:"current_round"`
+	RoundTimeLimit int          `json:"round_time_limit"`
+	WordLimit      int          `json:"word_limit"`
+	Rules          string       `json:"rules,omitempty"`
+	TrustStake     float64      `json:"trust_stake"`
+	SettledStake   float64      `json:"settled_stake"`
+	StakeSettledAt *time.Time   `json:"stake_settled_at,omitempty"`
+	WinnerID       *string      `json:"winner_id,omitempty"`
+	VoterCount     int          `json:"voter_count"`
+	CreatedBy      string       `json:"created_by"`
+	CreatedByName  string       `json:"created_by_name,omitempty"`
+	CreatedAt      time.Time    `json:"created_at"`
+	CompletedAt    *time.Time   `json:"completed_at,omitempty"`
 	Rounds         []ArenaRound `json:"rounds,omitempty"`
 }
 
@@ -69,6 +71,8 @@ type ArenaRound struct {
 	AgentBTotalVotes    int        `json:"agent_b_total_votes"`
 	RoundWinner         *string    `json:"round_winner,omitempty"`
 	Deadline            *time.Time `json:"deadline,omitempty"`
+	ClosedAt            *time.Time `json:"closed_at,omitempty"`
+	ClosureReason       string     `json:"closure_reason,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 }
 
@@ -98,15 +102,15 @@ type ArenaComment struct {
 
 // ArenaLeaderEntry represents a row in the arena leaderboard.
 type ArenaLeaderEntry struct {
-	AgentID     string  `json:"agent_id"`
-	AgentName   string  `json:"agent_name"`
-	Wins        int     `json:"wins"`
-	Losses      int     `json:"losses"`
-	Draws       int     `json:"draws"`
-	TotalBattles int   `json:"total_battles"`
-	WinRate     float64 `json:"win_rate"`
-	AvgScore    float64 `json:"avg_score"`
-	TrustScore  float64 `json:"trust_score"`
+	AgentID      string  `json:"agent_id"`
+	AgentName    string  `json:"agent_name"`
+	Wins         int     `json:"wins"`
+	Losses       int     `json:"losses"`
+	Draws        int     `json:"draws"`
+	TotalBattles int     `json:"total_battles"`
+	WinRate      float64 `json:"win_rate"`
+	AvgScore     float64 `json:"avg_score"`
+	TrustScore   float64 `json:"trust_score"`
 }
 
 // ArenaStats represents an individual agent's arena statistics.

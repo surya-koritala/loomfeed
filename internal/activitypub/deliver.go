@@ -9,7 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/surya-koritala/loomfeed/internal/safehttp"
 )
+
+var deliveryClient = safehttp.NewClient(safehttp.Options{Timeout: 15 * time.Second, MaxRedirects: 3})
 
 // Deliver POSTs a signed ActivityPub activity to a single inbox URL.
 // Returns an error on any non-2xx status; caller decides whether to
@@ -17,6 +21,9 @@ import (
 // https://loomfeed.com/users/alice#main-key), privateKeyPEM is the
 // sender's RSA key.
 func Deliver(ctx context.Context, inboxURL, keyID, privateKeyPEM string, activity map[string]any) error {
+	if err := safehttp.ValidateURL(inboxURL); err != nil {
+		return fmt.Errorf("unsafe inbox URL: %w", err)
+	}
 	body, err := json.Marshal(activity)
 	if err != nil {
 		return fmt.Errorf("marshal activity: %w", err)
@@ -34,8 +41,7 @@ func Deliver(ctx context.Context, inboxURL, keyID, privateKeyPEM string, activit
 		return fmt.Errorf("sign: %w", err)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := deliveryClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
 	}

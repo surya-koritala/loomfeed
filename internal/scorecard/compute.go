@@ -20,33 +20,35 @@ type Signal struct {
 	HasData      bool    `json:"-"`
 }
 
-// SignalScores holds all 10 scoring signals for an agent scorecard.
+// SignalScores holds all 11 scoring signals for an agent scorecard.
 type SignalScores struct {
-	TrustScore        Signal `json:"trust_score"`
-	Reputation        Signal `json:"reputation"`
-	EpistemicAccuracy Signal `json:"epistemic_accuracy"`
-	ContentQuality    Signal `json:"content_quality"`
-	SourceReliability Signal `json:"source_reliability"`
-	PostCount         Signal `json:"post_count"`
-	DomainExpertise   Signal `json:"domain_expertise"`
-	Verification      Signal `json:"verification"`
-	AcceptanceRate    Signal `json:"acceptance_rate"`
-	Tenure            Signal `json:"tenure"`
+	TrustScore         Signal `json:"trust_score"`
+	Reputation         Signal `json:"reputation"`
+	PredictionAccuracy Signal `json:"prediction_accuracy"`
+	CorrectionRate     Signal `json:"correction_rate"`
+	ContentQuality     Signal `json:"content_quality"`
+	SourceReliability  Signal `json:"source_reliability"`
+	PostCount          Signal `json:"post_count"`
+	DomainExpertise    Signal `json:"domain_expertise"`
+	Verification       Signal `json:"verification"`
+	AcceptanceRate     Signal `json:"acceptance_rate"`
+	Tenure             Signal `json:"tenure"`
 }
 
 // Weights holds the weighting factors for each signal.
 // All weights should sum to 1.0.
 type Weights struct {
-	TrustScore        float64 `json:"trust_score"`
-	Reputation        float64 `json:"reputation"`
-	EpistemicAccuracy float64 `json:"epistemic_accuracy"`
-	ContentQuality    float64 `json:"content_quality"`
-	SourceReliability float64 `json:"source_reliability"`
-	PostCount         float64 `json:"post_count"`
-	DomainExpertise   float64 `json:"domain_expertise"`
-	Verification      float64 `json:"verification"`
-	AcceptanceRate    float64 `json:"acceptance_rate"`
-	Tenure            float64 `json:"tenure"`
+	TrustScore         float64 `json:"trust_score"`
+	Reputation         float64 `json:"reputation"`
+	PredictionAccuracy float64 `json:"prediction_accuracy"`
+	CorrectionRate     float64 `json:"correction_rate"`
+	ContentQuality     float64 `json:"content_quality"`
+	SourceReliability  float64 `json:"source_reliability"`
+	PostCount          float64 `json:"post_count"`
+	DomainExpertise    float64 `json:"domain_expertise"`
+	Verification       float64 `json:"verification"`
+	AcceptanceRate     float64 `json:"acceptance_rate"`
+	Tenure             float64 `json:"tenure"`
 }
 
 // Scorecard is the computed agent scorecard for a participant.
@@ -62,16 +64,17 @@ type Scorecard struct {
 // DefaultWeights returns the default signal weights that sum to 1.0.
 func DefaultWeights() Weights {
 	return Weights{
-		TrustScore:        0.15,
-		Reputation:        0.10,
-		EpistemicAccuracy: 0.20,
-		ContentQuality:    0.15,
-		SourceReliability: 0.10,
-		PostCount:         0.05,
-		DomainExpertise:   0.05,
-		Verification:      0.05,
-		AcceptanceRate:    0.10,
-		Tenure:            0.05,
+		TrustScore:         0.135,
+		Reputation:         0.09,
+		PredictionAccuracy: 0.18,
+		CorrectionRate:     0.10,
+		ContentQuality:     0.135,
+		SourceReliability:  0.09,
+		PostCount:          0.045,
+		DomainExpertise:    0.045,
+		Verification:       0.045,
+		AcceptanceRate:     0.09,
+		Tenure:             0.045,
 	}
 }
 
@@ -109,7 +112,8 @@ func ComputeComposite(signals SignalScores, weights Weights) float64 {
 	pairs := []pair{
 		{signals.TrustScore.Normalized, weights.TrustScore, signals.TrustScore.HasData},
 		{signals.Reputation.Normalized, weights.Reputation, signals.Reputation.HasData},
-		{signals.EpistemicAccuracy.Normalized, weights.EpistemicAccuracy, signals.EpistemicAccuracy.HasData},
+		{signals.PredictionAccuracy.Normalized, weights.PredictionAccuracy, signals.PredictionAccuracy.HasData},
+		{signals.CorrectionRate.Normalized, weights.CorrectionRate, signals.CorrectionRate.HasData},
 		{signals.ContentQuality.Normalized, weights.ContentQuality, signals.ContentQuality.HasData},
 		{signals.SourceReliability.Normalized, weights.SourceReliability, signals.SourceReliability.HasData},
 		{signals.PostCount.Normalized, weights.PostCount, signals.PostCount.HasData},
@@ -282,38 +286,86 @@ func Compute(ctx context.Context, pool *pgxpool.Pool, participantID string) (*Sc
 	}
 	signals.SourceReliability.Contribution = signals.SourceReliability.Normalized * signals.SourceReliability.Weight
 
-	// Query 3: epistemic accuracy
-	var epistemicTotal, epistemicMatching int64
-
+	// Query 3: calibrated prediction accuracy. Generic post predictions use a
+	// binary Brier score in [0,1]. Sports agent predictions use the existing
+	// three-way Brier score in [0,2], so divide those by two before combining.
+	// Legacy human sports picks have no probabilities/Brier and fall back to
+	// categorical correctness.
+	var resolvedPredictions int64
+	var calibratedAccuracy float64
 	err = pool.QueryRow(ctx,
 		`SELECT COUNT(*),
-		        COUNT(*) FILTER (WHERE ev.status = p.epistemic_status)
-		 FROM epistemic_votes ev
-		 JOIN posts p ON p.id = ev.post_id
-		 WHERE p.author_id = $1 AND p.deleted_at IS NULL AND p.epistemic_status IS NOT NULL`,
+		        COALESCE(AVG(
+		            CASE
+		                WHEN brier IS NOT NULL THEN
+		                    1 - LEAST(1, GREATEST(0,
+		                        brier::float8 / CASE WHEN match_id IS NOT NULL THEN 2.0 ELSE 1.0 END
+		                    ))
+		                WHEN outcome = 'correct' THEN 1.0
+		                ELSE 0.0
+		            END
+		        ), 0)
+		 FROM predictions
+		 WHERE participant_id = $1 AND outcome IS NOT NULL`,
 		participantID,
-	).Scan(&epistemicTotal, &epistemicMatching)
+	).Scan(&resolvedPredictions, &calibratedAccuracy)
 	if err != nil {
 		return nil, err
 	}
 
-	if epistemicTotal > 0 {
-		epiNorm := float64(epistemicMatching) / float64(epistemicTotal)
-		signals.EpistemicAccuracy = Signal{
-			Raw:        epiNorm,
-			Normalized: clamp01(epiNorm),
-			Weight:     weights.EpistemicAccuracy,
+	if resolvedPredictions > 0 {
+		signals.PredictionAccuracy = Signal{
+			Raw:        calibratedAccuracy,
+			Normalized: clamp01(calibratedAccuracy),
+			Weight:     weights.PredictionAccuracy,
 			HasData:    true,
 		}
 	} else {
-		signals.EpistemicAccuracy = Signal{
-			Weight:  weights.EpistemicAccuracy,
+		signals.PredictionAccuracy = Signal{
+			Weight:  weights.PredictionAccuracy,
 			HasData: false,
 		}
 	}
-	signals.EpistemicAccuracy.Contribution = signals.EpistemicAccuracy.Normalized * signals.EpistemicAccuracy.Weight
+	signals.PredictionAccuracy.Contribution = signals.PredictionAccuracy.Normalized * signals.PredictionAccuracy.Weight
 
-	// Query 4: acceptance rate
+	// Query 4: correction rate. A correction becomes warranted the first
+	// time a post's winning epistemic status is contested. It is acknowledged
+	// only when the author retracts after that contest; an earlier unrelated
+	// retraction cannot earn credit for a later contest.
+	var correctionsWarranted, correctionsAcknowledged int64
+	err = pool.QueryRow(ctx,
+		`SELECT COUNT(*),
+		        COUNT(*) FILTER (
+		            WHERE retracted_at IS NOT NULL
+		              AND retracted_at >= first_contested_at
+		        )
+		 FROM posts
+		 WHERE author_id = $1
+		   AND deleted_at IS NULL
+		   AND first_contested_at IS NOT NULL`,
+		participantID,
+	).Scan(&correctionsWarranted, &correctionsAcknowledged)
+	if err != nil {
+		return nil, err
+	}
+
+	if correctionsWarranted > 0 {
+		correctionNorm := float64(correctionsAcknowledged) / float64(correctionsWarranted)
+		signals.CorrectionRate = Signal{
+			Raw:        correctionNorm,
+			Normalized: clamp01(correctionNorm),
+			Weight:     weights.CorrectionRate,
+			HasData:    true,
+		}
+	} else {
+		signals.CorrectionRate = Signal{
+			Weight:  weights.CorrectionRate,
+			HasData: false,
+		}
+	}
+	signals.CorrectionRate.Contribution = signals.CorrectionRate.Normalized * signals.CorrectionRate.Weight
+
+	// Query 5: acceptance rate
 	var totalComments, acceptedComments int64
 
 	err = pool.QueryRow(ctx,
@@ -341,7 +393,7 @@ func Compute(ctx context.Context, pool *pgxpool.Pool, participantID string) (*Sc
 	}
 	signals.AcceptanceRate.Contribution = signals.AcceptanceRate.Normalized * signals.AcceptanceRate.Weight
 
-	// Query 5: domain expertise (Herfindahl index)
+	// Query 6: domain expertise (Herfindahl index)
 	rows, err := pool.Query(ctx,
 		`SELECT community_id, COUNT(*) as cnt
 		 FROM posts WHERE author_id = $1 AND deleted_at IS NULL

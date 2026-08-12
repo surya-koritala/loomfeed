@@ -8,6 +8,7 @@ import (
 
 	"github.com/surya-koritala/loomfeed/internal/api"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
+	"github.com/surya-koritala/loomfeed/internal/arenaevents"
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 )
@@ -17,6 +18,11 @@ type ArenaHandler struct {
 	arena         *repository.ArenaRepo
 	participants  *repository.ParticipantRepo
 	notifications *repository.NotificationRepo
+	dispatcher    arenaEventDispatcher
+}
+
+type arenaEventDispatcher interface {
+	Dispatch(eventType string, payload map[string]any)
 }
 
 // NewArenaHandler creates a new ArenaHandler.
@@ -30,6 +36,11 @@ func NewArenaHandler(arena *repository.ArenaRepo, participants *repository.Parti
 // WithNotifications sets the notification repo for arena event notifications.
 func (h *ArenaHandler) WithNotifications(n *repository.NotificationRepo) {
 	h.notifications = n
+}
+
+// WithWebhook wires signed, asynchronous delivery for Arena lifecycle events.
+func (h *ArenaHandler) WithWebhook(dispatcher arenaEventDispatcher) {
+	h.dispatcher = dispatcher
 }
 
 // Create handles POST /api/v1/arena — creates a new battle and initializes all rounds.
@@ -56,6 +67,10 @@ func (h *ArenaHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AgentAID == req.AgentBID {
 		api.Error(w, http.StatusBadRequest, "agent_a_id and agent_b_id must be different")
+		return
+	}
+	if req.TrustStake < 0 {
+		api.Error(w, http.StatusBadRequest, "trust_stake must be non-negative")
 		return
 	}
 
@@ -159,7 +174,6 @@ func (h *ArenaHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Notify both agents and the creator about the new battle
 	if h.notifications != nil {
-		battleID := fullBattle.ID
 		creatorID := claims.ParticipantID
 		topic := fullBattle.Topic
 		msg := "You've been selected for an Arena battle: " + topic
@@ -180,7 +194,11 @@ func (h *ArenaHandler) Create(w http.ResponseWriter, r *http.Request) {
 				h.notifications.Create(r.Context(), agentB.OwnerID, "arena_battle", &creatorID, nil, nil, ownerMsg)
 			}
 		}()
-		_ = battleID // used for future webhook dispatch
+	}
+
+	h.dispatchArenaEvent(arenaevents.ChallengeCreated, arenaevents.ChallengePayload(fullBattle))
+	if len(rounds) > 0 {
+		h.dispatchArenaEvent(arenaevents.RoundOpened, arenaevents.RoundPayload(fullBattle, &rounds[0]))
 	}
 
 	api.JSON(w, http.StatusCreated, fullBattle)
@@ -345,9 +363,16 @@ func (h *ArenaHandler) SubmitArgument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.arena.SubmitArgument(r.Context(), id, roundNumber, claims.ParticipantID, req.Argument); err != nil {
+	openedRound, err := h.arena.SubmitArgument(r.Context(), id, roundNumber, claims.ParticipantID, req.Argument)
+	if err != nil {
 		api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to submit argument", err)
 		return
+	}
+	if openedRound > 0 {
+		if nextRound, getErr := h.arena.GetRoundByBattleAndNumber(r.Context(), id, openedRound); getErr == nil {
+			battle.CurrentRound = openedRound
+			h.dispatchArenaEvent(arenaevents.RoundOpened, arenaevents.RoundPayload(battle, nextRound))
+		}
 	}
 
 	api.JSON(w, http.StatusOK, map[string]string{
@@ -470,11 +495,22 @@ func (h *ArenaHandler) Vote(w http.ResponseWriter, r *http.Request) {
 		api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to cast vote", err)
 		return
 	}
+	if completedBattle, getErr := h.arena.GetBattle(r.Context(), id); getErr == nil {
+		if battle.Status != models.ArenaStatusCompleted && completedBattle.Status == models.ArenaStatusCompleted {
+			h.dispatchArenaEvent(arenaevents.BattleCompleted, arenaevents.CompletedPayload(completedBattle))
+		}
+	}
 
 	api.JSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"message": "vote recorded",
 	})
+}
+
+func (h *ArenaHandler) dispatchArenaEvent(eventType string, payload map[string]any) {
+	if h.dispatcher != nil {
+		h.dispatcher.Dispatch(eventType, payload)
+	}
 }
 
 // GetResults handles GET /api/v1/arena/{id}/results — returns final results with breakdown.
@@ -534,17 +570,17 @@ func (h *ArenaHandler) GetResults(w http.ResponseWriter, r *http.Request) {
 		"rounds": rounds,
 		"summary": map[string]any{
 			"agent_a": map[string]any{
-				"id":               battle.AgentAID,
-				"name":             battle.AgentAName,
-				"rounds_won":       agentAWins,
+				"id":                 battle.AgentAID,
+				"name":               battle.AgentAName,
+				"rounds_won":         agentAWins,
 				"avg_argument_score": agentATotalArgScore / roundCount,
 				"avg_source_score":   agentATotalSrcScore / roundCount,
 				"avg_clarity_score":  agentATotalClrScore / roundCount,
 			},
 			"agent_b": map[string]any{
-				"id":               battle.AgentBID,
-				"name":             battle.AgentBName,
-				"rounds_won":       agentBWins,
+				"id":                 battle.AgentBID,
+				"name":               battle.AgentBName,
+				"rounds_won":         agentBWins,
 				"avg_argument_score": agentBTotalArgScore / roundCount,
 				"avg_source_score":   agentBTotalSrcScore / roundCount,
 				"avg_clarity_score":  agentBTotalClrScore / roundCount,

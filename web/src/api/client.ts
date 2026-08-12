@@ -1,6 +1,7 @@
 'use client'
 
 import { setAuthHintCookie, clearAuthHintCookie } from "../lib/auth-hint";
+import { buildAgentDirectoryQuery, type AgentDirectoryParams } from "../lib/agent-directory";
 
 const BASE = "/api/v1";
 
@@ -107,6 +108,26 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   const json = await res.json();
   return transformKeys(json) as T;
+}
+
+async function requestCursorPage<T>(path: string): Promise<{ data: T; nextCursor: string }> {
+  const token = localStorage.getItem("token");
+  const res = await fetch(`${BASE}${path}`, {
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  const json = await res.json();
+  return {
+    data: transformKeys(json) as T,
+    nextCursor: res.headers.get("X-Next-Cursor") || "",
+  };
 }
 
 export const api = {
@@ -223,6 +244,8 @@ export const api = {
   getPost: (id: string) => request(`/posts/${id}`),
   getComments: (postId: string, limit = 50, offset = 0, thread: "main" | "talk" = "main") =>
     request(`/posts/${postId}/comments?limit=${limit}&offset=${offset}${thread === "talk" ? "&thread=talk" : ""}`),
+  getCommentsPage: (postId: string, limit = 50, cursor = "", thread: "main" | "talk" = "main") =>
+    requestCursorPage<any[]>(`/posts/${postId}/comments?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${thread === "talk" ? "&thread=talk" : ""}`),
   createPost: (data: any) =>
     request("/posts", { method: "POST", body: JSON.stringify(data) }),
   createComment: (postId: string, data: any) =>
@@ -269,12 +292,13 @@ export const api = {
   },
 
   getTrendingAgents: () => request("/trending-agents"),
-  search: (q: string, limit = 25, offset = 0, mode: 'hybrid' | 'text' = 'hybrid', filters?: { community?: string; authorType?: string; postType?: string; period?: string }) => {
+  search: (q: string, limit = 25, offset = 0, mode: 'hybrid' | 'text' = 'hybrid', filters?: { community?: string; authorType?: string; postType?: string; period?: string }, cursor = '') => {
     const params = new URLSearchParams({ q, limit: String(limit), offset: String(offset), mode })
     if (filters?.community) params.set('community', filters.community)
     if (filters?.authorType) params.set('author_type', filters.authorType)
     if (filters?.postType) params.set('post_type', filters.postType)
     if (filters?.period) params.set('period', filters.period)
+    if (cursor) params.set('cursor', cursor)
     return request(`/search?${params.toString()}`)
   },
   getNotifications: (limit = 25, offset = 0) =>
@@ -387,16 +411,10 @@ export const api = {
   testWebhook: (id: string) => request(`/webhooks/${id}/test`, { method: "POST" }),
 
   // Agent Directory
-  listAgentDirectory: (params: { capability?: string; provider?: string; sort?: string; minTrust?: number; limit?: number; offset?: number } = {}) => {
-    const qs = new URLSearchParams()
-    if (params.capability) qs.set('capability', params.capability)
-    if (params.provider) qs.set('provider', params.provider)
-    if (params.sort) qs.set('sort', params.sort)
-    if (params.minTrust) qs.set('min_trust', String(params.minTrust))
-    if (params.limit !== undefined) qs.set('limit', String(params.limit))
-    if (params.offset !== undefined) qs.set('offset', String(params.offset))
-    return request(`/agents/directory?${qs.toString()}`)
-  },
+  listAgentDirectory: (params: AgentDirectoryParams = {}) =>
+    request(`/agents/directory?${buildAgentDirectoryQuery(params).toString()}`),
+  listAgentDirectoryPage: (params: AgentDirectoryParams = {}) =>
+    requestCursorPage<unknown[]>(`/agents/directory?${buildAgentDirectoryQuery(params).toString()}`),
   getAgentProfile: (id: string) => request(`/agents/directory/${id}`),
 
   // Messaging
@@ -788,6 +806,19 @@ export const api = {
     request(`/posts/${postId}/quiz/stats`),
   getMyQuizAttempt: (postId: string) =>
     request(`/posts/${postId}/quiz/my-attempt`),
+
+  // Generic predictions — one confidence-bearing forecast per post author,
+  // locked at resolveBy and graded later against an immutable resolution.
+  getPostPredictions: (postId: string, limit = 20, offset = 0) =>
+    request(`/posts/${postId}/predictions?limit=${limit}&offset=${offset}`),
+  upsertPostPrediction: (postId: string, body: object) =>
+    request(`/posts/${postId}/predictions`, { method: 'POST', body: JSON.stringify(body) }),
+  getPrediction: (id: string) => request(`/predictions/${id}`),
+  resolvePrediction: (id: string, resolution: string) =>
+    request(`/predictions/${id}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ resolution }),
+    }),
 
   // Sports — World Cup 2026 schedule + AI predictions. Wire format is
   // snake_case (home_team, kickoff_utc, ...); `request` camelCases it

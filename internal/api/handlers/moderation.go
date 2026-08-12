@@ -8,15 +8,23 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/api"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
 	"github.com/surya-koritala/loomfeed/internal/config"
+	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 )
 
 // ModerationHandler handles community moderation endpoints.
 type ModerationHandler struct {
-	moderation  *repository.ModerationRepo
-	communities *repository.CommunityRepo
-	reports     *repository.ReportRepo
-	cfg         *config.Config
+	moderation   *repository.ModerationRepo
+	communities  *repository.CommunityRepo
+	reports      *repository.ReportRepo
+	qualityGates *repository.QualityGateRepo
+	cfg          *config.Config
+}
+
+// WithQualityGates exposes the schema-backed policy through the existing
+// community settings endpoint and moderation dashboard.
+func (h *ModerationHandler) WithQualityGates(gates *repository.QualityGateRepo) {
+	h.qualityGates = gates
 }
 
 // NewModerationHandler creates a new ModerationHandler.
@@ -88,8 +96,20 @@ func (h *ModerationHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		pendingReports = []map[string]any{}
 	}
 
+	qualityGate := &models.QualityGate{CommunityID: community.ID}
+	if h.qualityGates != nil {
+		gate, gateErr := h.qualityGates.GetByCommunityID(r.Context(), community.ID)
+		if gateErr == nil {
+			qualityGate = gate
+		} else if !errors.Is(gateErr, pgx.ErrNoRows) {
+			api.Error(w, http.StatusInternalServerError, "failed to get quality gate")
+			return
+		}
+	}
+
 	api.JSON(w, http.StatusOK, map[string]any{
 		"community":       community,
+		"quality_gate":    qualityGate,
 		"moderators":      mods,
 		"pending_reports": pendingReports,
 	})
@@ -325,13 +345,14 @@ func (h *ModerationHandler) UpdateSettings(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		Description      *string  `json:"description"`
-		Rules            *string  `json:"rules"`
-		AgentPolicy      *string  `json:"agent_policy"`
-		QualityThreshold *float64 `json:"quality_threshold"`
-		AllowedPostTypes []string `json:"allowed_post_types"`
-		RequireTags      *bool    `json:"require_tags"`
-		MinBodyLength    *int     `json:"min_body_length"`
+		Description      *string             `json:"description"`
+		Rules            *string             `json:"rules"`
+		AgentPolicy      *string             `json:"agent_policy"`
+		QualityThreshold *float64            `json:"quality_threshold"`
+		AllowedPostTypes []string            `json:"allowed_post_types"`
+		RequireTags      *bool               `json:"require_tags"`
+		MinBodyLength    *int                `json:"min_body_length"`
+		QualityGate      *models.QualityGate `json:"quality_gate"`
 	}
 	if err := api.Decode(r, &req); err != nil {
 		api.Error(w, http.StatusBadRequest, "invalid request")
@@ -362,14 +383,42 @@ func (h *ModerationHandler) UpdateSettings(w http.ResponseWriter, r *http.Reques
 		updates["min_body_length"] = *req.MinBodyLength
 	}
 
-	if len(updates) == 0 {
+	if req.QualityGate != nil {
+		if req.QualityGate.MinTrustScore < 0 || req.QualityGate.MinTrustScore > 100 {
+			api.Error(w, http.StatusBadRequest, "quality_gate.min_trust_score must be between 0 and 100")
+			return
+		}
+		if req.QualityGate.MinConfidenceScore < 0 || req.QualityGate.MinConfidenceScore > 1 {
+			api.Error(w, http.StatusBadRequest, "quality_gate.min_confidence_score must be between 0 and 1")
+			return
+		}
+		if req.QualityGate.MaxAgentPostsPerHour < 0 || req.QualityGate.MaxAgentPostsPerHour > 10000 {
+			api.Error(w, http.StatusBadRequest, "quality_gate.max_agent_posts_per_hour must be between 0 and 10000")
+			return
+		}
+		if h.qualityGates == nil {
+			api.Error(w, http.StatusServiceUnavailable, "quality gates are not configured")
+			return
+		}
+		req.QualityGate.CommunityID = community.ID
+	}
+
+	if len(updates) == 0 && req.QualityGate == nil {
 		api.JSON(w, http.StatusOK, map[string]string{"status": "no changes"})
 		return
 	}
 
-	if err := h.communities.UpdateSettings(r.Context(), community.ID, updates); err != nil {
-		api.Error(w, http.StatusInternalServerError, "failed to update settings")
-		return
+	if len(updates) > 0 {
+		if err := h.communities.UpdateSettings(r.Context(), community.ID, updates); err != nil {
+			api.Error(w, http.StatusInternalServerError, "failed to update settings")
+			return
+		}
+	}
+	if req.QualityGate != nil {
+		if _, err := h.qualityGates.Upsert(r.Context(), req.QualityGate); err != nil {
+			api.Error(w, http.StatusInternalServerError, "failed to update quality gate")
+			return
+		}
 	}
 
 	api.JSON(w, http.StatusOK, map[string]string{"status": "updated"})

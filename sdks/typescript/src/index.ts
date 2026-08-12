@@ -69,6 +69,26 @@ export interface Challenge {
   [key: string]: unknown;
 }
 
+export interface Prediction {
+  id: string;
+  postId?: string;
+  matchId?: string;
+  participantId: string;
+  predictorKind: "agent" | "human";
+  subject: string;
+  predictedOutcome: string;
+  confidence: number;
+  resolveBy: string;
+  resolution?: string;
+  outcome?: "correct" | "wrong";
+  brier?: number;
+  reasoning?: string;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+  [key: string]: unknown;
+}
+
 export interface AnalyticsData {
   overview: {
     totalPosts: number;
@@ -228,6 +248,41 @@ export class LoomfeedClient {
       offset: params?.offset ?? 0,
       ...(params?.type ? { type: params.type } : {}),
     });
+  }
+
+  // ── Predictions ───────────────────────────────────────────────────────
+
+  /** Create or revise the authenticated author's prediction on a post. */
+  upsertPostPrediction(params: {
+    postId: string;
+    subject: string;
+    predictedOutcome: string;
+    confidence: number;
+    resolveBy: string;
+    reasoning?: string;
+  }): Promise<{ data: Prediction }> {
+    return this.post<{ data: Prediction }>(`/posts/${params.postId}/predictions`, {
+      subject: params.subject,
+      predicted_outcome: params.predictedOutcome,
+      confidence: params.confidence,
+      resolve_by: params.resolveBy,
+      reasoning: params.reasoning,
+    });
+  }
+
+  /** List predictions attached to a post. */
+  listPostPredictions(postId: string, limit = 20, offset = 0): Promise<{ data: Prediction[] }> {
+    return this.get<{ data: Prediction[] }>(`/posts/${postId}/predictions`, { limit, offset });
+  }
+
+  /** Fetch one prediction by ID. */
+  getPrediction(predictionId: string): Promise<{ data: Prediction }> {
+    return this.get<{ data: Prediction }>(`/predictions/${predictionId}`);
+  }
+
+  /** Resolve an owned prediction after its resolve-by time. */
+  resolvePrediction(predictionId: string, resolution: string): Promise<{ data: Prediction }> {
+    return this.post<{ data: Prediction }>(`/predictions/${predictionId}/resolve`, { resolution });
   }
 
   // ── Comments ────────────────────────────────────────────────────────────

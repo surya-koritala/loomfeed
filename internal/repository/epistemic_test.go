@@ -4,10 +4,87 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 )
+
+func TestEpistemicRepo_RecordsFirstContestedAtOnce(t *testing.T) {
+	pool := database.TestPool(t)
+	database.CleanupTables(t, pool, "epistemic_votes", "reputation_events", "votes", "posts", "communities", "participants")
+
+	pRepo := repository.NewParticipantRepo(pool)
+	cRepo := repository.NewCommunityRepo(pool)
+	postRepo := repository.NewPostRepo(pool)
+	eRepo := repository.NewEpistemicRepo(pool)
+	ctx := context.Background()
+
+	owner := createTestOwner(t, pRepo, ctx, "first-contested")
+	community := createTestCommunity(t, cRepo, ctx, owner.ID, "first-contested")
+	post := createTestPost(t, postRepo, ctx, community.ID, owner.ID, "First contested timestamp")
+
+	if err := eRepo.Vote(ctx, post.ID, owner.ID, "contested"); err != nil {
+		t.Fatalf("first contested vote: %v", err)
+	}
+
+	var first time.Time
+	if err := pool.QueryRow(ctx, `SELECT first_contested_at FROM posts WHERE id = $1`, post.ID).Scan(&first); err != nil {
+		t.Fatalf("read first_contested_at: %v", err)
+	}
+
+	if err := eRepo.Vote(ctx, post.ID, owner.ID, "supported"); err != nil {
+		t.Fatalf("move away from contested: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if err := eRepo.Vote(ctx, post.ID, owner.ID, "contested"); err != nil {
+		t.Fatalf("second contested vote: %v", err)
+	}
+
+	var got time.Time
+	if err := pool.QueryRow(ctx, `SELECT first_contested_at FROM posts WHERE id = $1`, post.ID).Scan(&got); err != nil {
+		t.Fatalf("read stable first_contested_at: %v", err)
+	}
+	if !got.Equal(first) {
+		t.Fatalf("first_contested_at changed from %s to %s", first, got)
+	}
+}
+
+func TestPostRepo_RetractRecordsStableTimestamp(t *testing.T) {
+	pool := database.TestPool(t)
+	database.CleanupTables(t, pool, "votes", "posts", "communities", "participants")
+
+	pRepo := repository.NewParticipantRepo(pool)
+	cRepo := repository.NewCommunityRepo(pool)
+	postRepo := repository.NewPostRepo(pool)
+	ctx := context.Background()
+
+	owner := createTestOwner(t, pRepo, ctx, "retracted-at")
+	community := createTestCommunity(t, cRepo, ctx, owner.ID, "retracted-at")
+	post := createTestPost(t, postRepo, ctx, community.ID, owner.ID, "Retraction timestamp")
+
+	if err := postRepo.Retract(ctx, post.ID, "first notice"); err != nil {
+		t.Fatalf("first retract: %v", err)
+	}
+
+	var first time.Time
+	if err := pool.QueryRow(ctx, `SELECT retracted_at FROM posts WHERE id = $1`, post.ID).Scan(&first); err != nil {
+		t.Fatalf("read retracted_at: %v", err)
+	}
+
+	time.Sleep(time.Millisecond)
+	if err := postRepo.Retract(ctx, post.ID, "updated notice"); err != nil {
+		t.Fatalf("second retract: %v", err)
+	}
+
+	var got time.Time
+	if err := pool.QueryRow(ctx, `SELECT retracted_at FROM posts WHERE id = $1`, post.ID).Scan(&got); err != nil {
+		t.Fatalf("read stable retracted_at: %v", err)
+	}
+	if !got.Equal(first) {
+		t.Fatalf("retracted_at changed from %s to %s", first, got)
+	}
+}
 
 func TestEpistemicRepo_Vote(t *testing.T) {
 	pool := database.TestPool(t)

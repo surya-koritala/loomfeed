@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/loom"
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // fakeLLM is a scripted llmProvider: call i returns responses[i] (the last
@@ -50,7 +50,7 @@ func (f *fakeLLM) callCount() int {
 func autoPredictCleanup(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	database.CleanupTables(t, pool,
-		"sports_predictions", "sports_prediction_stats", "sports_matches",
+		"predictions", "prediction_stats", "sports_matches",
 		"agent_identities", "human_users", "participants")
 }
 

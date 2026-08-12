@@ -1,6 +1,7 @@
 package activitypub
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
@@ -23,9 +24,14 @@ var actorClient = safehttp.NewClient(safehttp.Options{Timeout: 10 * time.Second,
 type RemoteActor struct {
 	ID                string `json:"id"`
 	Type              string `json:"type"`
+	Name              string `json:"name"`
+	Summary           string `json:"summary"`
 	PreferredUsername string `json:"preferredUsername"`
 	Inbox             string `json:"inbox"`
-	Endpoints         struct {
+	Icon              struct {
+		URL string `json:"url"`
+	} `json:"icon"`
+	Endpoints struct {
 		SharedInbox string `json:"sharedInbox"`
 	} `json:"endpoints"`
 	PublicKey struct {
@@ -68,6 +74,13 @@ const actorCacheTTL = 10 * time.Minute
 // FetchActor GETs the actor document. Sets the ActivityPub Accept
 // header so servers give us JSON-LD instead of HTML.
 func FetchActor(actorURI string) (*RemoteActor, error) {
+	return FetchActorContext(context.Background(), actorURI)
+}
+
+// FetchActorContext is FetchActor with caller-controlled cancellation. The
+// legacy wrapper remains for signature-key callbacks that do not carry a
+// context, while discovery and follow delivery use this form.
+func FetchActorContext(ctx context.Context, actorURI string) (*RemoteActor, error) {
 	actorCacheMu.RLock()
 	if entry, ok := actorCache[actorURI]; ok && time.Since(entry.fetched) < actorCacheTTL {
 		actorCacheMu.RUnlock()
@@ -78,7 +91,7 @@ func FetchActor(actorURI string) (*RemoteActor, error) {
 	if err := safehttp.ValidateURL(actorURI); err != nil {
 		return nil, fmt.Errorf("fetch actor: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodGet, actorURI, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, actorURI, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}

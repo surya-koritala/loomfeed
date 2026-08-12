@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,9 @@ func NewArenaRepo(pool *pgxpool.Pool) *ArenaRepo {
 
 // CreateBattle inserts a new arena battle.
 func (r *ArenaRepo) CreateBattle(ctx context.Context, battle *models.ArenaBattle) (*models.ArenaBattle, error) {
+	if battle.TrustStake < 0 || math.IsNaN(battle.TrustStake) || math.IsInf(battle.TrustStake, 0) {
+		return nil, fmt.Errorf("create arena battle: trust stake must be a finite non-negative number")
+	}
 	var b models.ArenaBattle
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO arena_battles (topic, description, agent_a_id, agent_b_id, format, status,
@@ -30,7 +34,8 @@ func (r *ArenaRepo) CreateBattle(ctx context.Context, battle *models.ArenaBattle
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, topic, description, agent_a_id, agent_b_id, format, status,
 		          total_rounds, current_round, round_time_limit, word_limit,
-		          rules, trust_stake, winner_id, voter_count, created_by, created_at, completed_at`,
+		          rules, trust_stake, settled_stake, stake_settled_at,
+		          winner_id, voter_count, created_by, created_at, completed_at`,
 		battle.Topic, battle.Description, battle.AgentAID, battle.AgentBID,
 		battle.Format, models.ArenaStatusPending,
 		battle.TotalRounds, 0, battle.RoundTimeLimit, battle.WordLimit,
@@ -39,7 +44,7 @@ func (r *ArenaRepo) CreateBattle(ctx context.Context, battle *models.ArenaBattle
 		&b.ID, &b.Topic, &b.Description, &b.AgentAID, &b.AgentBID,
 		&b.Format, &b.Status,
 		&b.TotalRounds, &b.CurrentRound, &b.RoundTimeLimit, &b.WordLimit,
-		&b.Rules, &b.TrustStake, &b.WinnerID, &b.VoterCount,
+		&b.Rules, &b.TrustStake, &b.SettledStake, &b.StakeSettledAt, &b.WinnerID, &b.VoterCount,
 		&b.CreatedBy, &b.CreatedAt, &b.CompletedAt,
 	)
 	if err != nil {
@@ -57,7 +62,8 @@ func (r *ArenaRepo) GetBattle(ctx context.Context, id string) (*models.ArenaBatt
 		       ab.agent_b_id, COALESCE(pb.display_name, '') as agent_b_name,
 		       ab.format, ab.status, ab.total_rounds, ab.current_round,
 		       ab.round_time_limit, ab.word_limit, COALESCE(ab.rules, '') as rules,
-		       ab.trust_stake, ab.winner_id, ab.voter_count,
+		       ab.trust_stake, ab.settled_stake, ab.stake_settled_at,
+		       ab.winner_id, ab.voter_count,
 		       ab.created_by, COALESCE(pc.display_name, '') as created_by_name,
 		       ab.created_at, ab.completed_at
 		FROM arena_battles ab
@@ -72,7 +78,7 @@ func (r *ArenaRepo) GetBattle(ctx context.Context, id string) (*models.ArenaBatt
 		&b.AgentBID, &b.AgentBName,
 		&b.Format, &b.Status, &b.TotalRounds, &b.CurrentRound,
 		&b.RoundTimeLimit, &b.WordLimit, &b.Rules,
-		&b.TrustStake, &b.WinnerID, &b.VoterCount,
+		&b.TrustStake, &b.SettledStake, &b.StakeSettledAt, &b.WinnerID, &b.VoterCount,
 		&b.CreatedBy, &b.CreatedByName,
 		&b.CreatedAt, &b.CompletedAt,
 	)
@@ -107,7 +113,8 @@ func (r *ArenaRepo) ListBattles(ctx context.Context, status string, limit, offse
 		       ab.agent_b_id, COALESCE(pb.display_name, '') as agent_b_name,
 		       ab.format, ab.status, ab.total_rounds, ab.current_round,
 		       ab.round_time_limit, ab.word_limit, COALESCE(ab.rules, '') as rules,
-		       ab.trust_stake, ab.winner_id, ab.voter_count,
+		       ab.trust_stake, ab.settled_stake, ab.stake_settled_at,
+		       ab.winner_id, ab.voter_count,
 		       ab.created_by, COALESCE(pc.display_name, '') as created_by_name,
 		       ab.created_at, ab.completed_at
 		FROM arena_battles ab
@@ -142,7 +149,7 @@ func (r *ArenaRepo) ListBattles(ctx context.Context, status string, limit, offse
 			&b.AgentBID, &b.AgentBName,
 			&b.Format, &b.Status, &b.TotalRounds, &b.CurrentRound,
 			&b.RoundTimeLimit, &b.WordLimit, &b.Rules,
-			&b.TrustStake, &b.WinnerID, &b.VoterCount,
+			&b.TrustStake, &b.SettledStake, &b.StakeSettledAt, &b.WinnerID, &b.VoterCount,
 			&b.CreatedBy, &b.CreatedByName,
 			&b.CreatedAt, &b.CompletedAt,
 		); err != nil {
@@ -155,19 +162,144 @@ func (r *ArenaRepo) ListBattles(ctx context.Context, status string, limit, offse
 
 // UpdateBattleStatus updates the status and optionally the winner of a battle.
 func (r *ArenaRepo) UpdateBattleStatus(ctx context.Context, id string, status models.ArenaStatus, winnerID *string) error {
-	var err error
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin arena status update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	if status == models.ArenaStatusCompleted {
-		_, err = r.pool.Exec(ctx, `
+		result, updateErr := tx.Exec(ctx, `
 			UPDATE arena_battles SET status = $1, winner_id = $2, completed_at = NOW()
 			WHERE id = $3`,
 			status, winnerID, id)
+		if updateErr != nil {
+			return fmt.Errorf("update arena battle status: %w", updateErr)
+		}
+		if result.RowsAffected() == 0 {
+			return fmt.Errorf("update arena battle status: battle not found")
+		}
+		if err := settleArenaStakeTx(ctx, tx, id, winnerID); err != nil {
+			return fmt.Errorf("settle arena battle stake: %w", err)
+		}
 	} else {
-		_, err = r.pool.Exec(ctx, `
+		result, updateErr := tx.Exec(ctx, `
 			UPDATE arena_battles SET status = $1 WHERE id = $2`,
 			status, id)
+		if updateErr != nil {
+			return fmt.Errorf("update arena battle status: %w", updateErr)
+		}
+		if result.RowsAffected() == 0 {
+			return fmt.Errorf("update arena battle status: battle not found")
+		}
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit arena status update: %w", err)
+	}
+	return nil
+}
+
+// settleArenaStakeTx applies exactly one zero-sum reputation transfer for a
+// completed battle. The battle marker and both reputation events share the
+// caller's transaction, so retries either observe a completed settlement or
+// replay none of it.
+func settleArenaStakeTx(ctx context.Context, tx pgx.Tx, battleID string, winnerID *string) error {
+	var agentAID, agentBID string
+	var requestedStake float64
+	var settledAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT agent_a_id, agent_b_id, trust_stake, stake_settled_at
+		FROM arena_battles WHERE id = $1 FOR UPDATE`, battleID,
+	).Scan(&agentAID, &agentBID, &requestedStake, &settledAt); err != nil {
+		return fmt.Errorf("lock arena stake: %w", err)
+	}
+	if settledAt != nil {
+		return nil
+	}
+	if requestedStake < 0 || math.IsNaN(requestedStake) || math.IsInf(requestedStake, 0) {
+		return fmt.Errorf("invalid trust stake %v", requestedStake)
+	}
+	if winnerID != nil && *winnerID != agentAID && *winnerID != agentBID {
+		return fmt.Errorf("winner %s is not a battle participant", *winnerID)
+	}
+
+	// Lock both balances in a stable order before writing either event. This
+	// prevents opposing simultaneous battles from acquiring participant locks
+	// in opposite orders.
+	firstID, secondID := agentAID, agentBID
+	if secondID < firstID {
+		firstID, secondID = secondID, firstID
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id FROM participants
+		WHERE id IN ($1, $2)
+		ORDER BY id
+		FOR UPDATE`, firstID, secondID)
 	if err != nil {
-		return fmt.Errorf("update arena battle status: %w", err)
+		return fmt.Errorf("lock arena participant balances: %w", err)
+	}
+	locked := 0
+	for rows.Next() {
+		var participantID string
+		if err := rows.Scan(&participantID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan arena participant lock: %w", err)
+		}
+		locked++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate arena participant locks: %w", err)
+	}
+	rows.Close()
+	if locked != 2 {
+		return fmt.Errorf("lock arena participant balances: expected 2 participants, got %d", locked)
+	}
+
+	settledStake := 0.0
+	if requestedStake > 0 {
+		if winnerID == nil {
+			if _, _, err := ApplyExactReputationDeltaTx(ctx, tx, agentAID, EventArenaStakeReturn, 0); err != nil {
+				return fmt.Errorf("return agent A arena stake: %w", err)
+			}
+			if _, _, err := ApplyExactReputationDeltaTx(ctx, tx, agentBID, EventArenaStakeReturn, 0); err != nil {
+				return fmt.Errorf("return agent B arena stake: %w", err)
+			}
+		} else {
+			winner := *winnerID
+			loser := ""
+			switch winner {
+			case agentAID:
+				loser = agentBID
+			case agentBID:
+				loser = agentAID
+			}
+
+			var loserBalance float64
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(reputation_score, 0) FROM participants WHERE id = $1`, loser).Scan(&loserBalance); err != nil {
+				return fmt.Errorf("read arena loser balance: %w", err)
+			}
+			settledStake = math.Min(requestedStake, math.Max(0, loserBalance))
+			if _, _, err := ApplyExactReputationDeltaTx(ctx, tx, winner, EventArenaStakeWon, settledStake); err != nil {
+				return fmt.Errorf("credit arena stake winner: %w", err)
+			}
+			if _, applied, err := ApplyExactReputationDeltaTx(ctx, tx, loser, EventArenaStakeLost, -settledStake); err != nil {
+				return fmt.Errorf("debit arena stake loser: %w", err)
+			} else if applied != -settledStake {
+				return fmt.Errorf("arena stake changed while locked: debited %v, expected %v", applied, -settledStake)
+			}
+		}
+	}
+
+	result, err := tx.Exec(ctx, `
+		UPDATE arena_battles
+		SET settled_stake = $2, stake_settled_at = NOW()
+		WHERE id = $1 AND stake_settled_at IS NULL`, battleID, settledStake)
+	if err != nil {
+		return fmt.Errorf("mark arena stake settled: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("mark arena stake settled: settlement marker changed concurrently")
 	}
 	return nil
 }
@@ -195,7 +327,7 @@ func (r *ArenaRepo) GetRounds(ctx context.Context, battleID string) ([]models.Ar
 		       agent_a_source_score, agent_b_source_score,
 		       agent_a_clarity_score, agent_b_clarity_score,
 		       agent_a_total_votes, agent_b_total_votes,
-		       round_winner, deadline, created_at
+		       round_winner, deadline, closed_at, COALESCE(closure_reason, ''), created_at
 		FROM arena_rounds
 		WHERE battle_id = $1
 		ORDER BY round_number ASC`,
@@ -217,7 +349,7 @@ func (r *ArenaRepo) GetRounds(ctx context.Context, battleID string) ([]models.Ar
 			&rd.AgentASourceScore, &rd.AgentBSourceScore,
 			&rd.AgentAClarityScore, &rd.AgentBClarityScore,
 			&rd.AgentATotalVotes, &rd.AgentBTotalVotes,
-			&rd.RoundWinner, &rd.Deadline, &rd.CreatedAt,
+			&rd.RoundWinner, &rd.Deadline, &rd.ClosedAt, &rd.ClosureReason, &rd.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan arena round: %w", err)
 		}
@@ -229,10 +361,10 @@ func (r *ArenaRepo) GetRounds(ctx context.Context, battleID string) ([]models.Ar
 // SubmitArgument records an agent's argument for a specific round.
 // It updates the appropriate column based on which agent is submitting.
 // If both agents have submitted, it advances the battle's current_round.
-func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNumber int, agentID, argument string) error {
+func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNumber int, agentID, argument string) (int, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -244,11 +376,11 @@ func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNu
 		battleID,
 	).Scan(&agentAID, &agentBID, &battleStatus)
 	if err != nil {
-		return fmt.Errorf("get battle for submit: %w", err)
+		return 0, fmt.Errorf("get battle for submit: %w", err)
 	}
 
 	if battleStatus != models.ArenaStatusActive && battleStatus != models.ArenaStatusPending {
-		return fmt.Errorf("battle is not active")
+		return 0, fmt.Errorf("battle is not active")
 	}
 
 	// Determine which column to update
@@ -262,7 +394,7 @@ func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNu
 		submittedAtCol = "agent_b_submitted_at"
 		otherSubmittedAtCol = "agent_a_submitted_at"
 	} else {
-		return fmt.Errorf("agent is not a participant in this battle")
+		return 0, fmt.Errorf("agent is not a participant in this battle")
 	}
 
 	// Update the argument
@@ -276,7 +408,7 @@ func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNu
 		argument, now, battleID, roundNumber,
 	).Scan(&otherSubmittedAt)
 	if err != nil {
-		return fmt.Errorf("submit argument: %w", err)
+		return 0, fmt.Errorf("submit argument: %w", err)
 	}
 
 	// If this is the first submission on round 1 for a pending battle, activate it
@@ -285,18 +417,19 @@ func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNu
 			UPDATE arena_battles SET status = 'active', current_round = 1 WHERE id = $1`,
 			battleID)
 		if err != nil {
-			return fmt.Errorf("activate battle: %w", err)
+			return 0, fmt.Errorf("activate battle: %w", err)
 		}
 	}
 
 	// If both agents have now submitted, advance the current round counter
+	openedRound := 0
 	if otherSubmittedAt != nil {
 		var totalRounds int
 		err = tx.QueryRow(ctx, `
 			SELECT total_rounds FROM arena_battles WHERE id = $1`, battleID,
 		).Scan(&totalRounds)
 		if err != nil {
-			return fmt.Errorf("get total rounds: %w", err)
+			return 0, fmt.Errorf("get total rounds: %w", err)
 		}
 
 		if roundNumber < totalRounds {
@@ -304,15 +437,16 @@ func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNu
 				UPDATE arena_battles SET current_round = $1 WHERE id = $2`,
 				roundNumber+1, battleID)
 			if err != nil {
-				return fmt.Errorf("advance round: %w", err)
+				return 0, fmt.Errorf("advance round: %w", err)
 			}
+			openedRound = roundNumber + 1
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
+		return 0, fmt.Errorf("commit tx: %w", err)
 	}
-	return nil
+	return openedRound, nil
 }
 
 // CastVote records a human's vote on a round and updates round score totals.
@@ -322,6 +456,23 @@ func (r *ArenaRepo) CastVote(ctx context.Context, vote *models.ArenaVote) error 
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize vote-driven completion on the battle row. A request that was
+	// admitted just before another vote completed the battle must not revise
+	// the winner after the stake has already been settled.
+	var agentAID, agentBID string
+	var battleStatus models.ArenaStatus
+	err = tx.QueryRow(ctx, `
+		SELECT agent_a_id, agent_b_id, status
+		FROM arena_battles WHERE id = $1 FOR UPDATE`,
+		vote.BattleID,
+	).Scan(&agentAID, &agentBID, &battleStatus)
+	if err != nil {
+		return fmt.Errorf("lock battle for vote: %w", err)
+	}
+	if battleStatus != models.ArenaStatusActive {
+		return fmt.Errorf("battle is not active")
+	}
 
 	// Insert the vote
 	_, err = tx.Exec(ctx, `
@@ -333,16 +484,6 @@ func (r *ArenaRepo) CastVote(ctx context.Context, vote *models.ArenaVote) error 
 	)
 	if err != nil {
 		return fmt.Errorf("cast arena vote: %w", err)
-	}
-
-	// Get the battle to determine agent IDs
-	var agentAID, agentBID string
-	err = tx.QueryRow(ctx, `
-		SELECT agent_a_id, agent_b_id FROM arena_battles WHERE id = $1`,
-		vote.BattleID,
-	).Scan(&agentAID, &agentBID)
-	if err != nil {
-		return fmt.Errorf("get battle agents: %w", err)
 	}
 
 	// Recalculate round scores from all votes for this round
@@ -476,12 +617,182 @@ func (r *ArenaRepo) CastVote(ctx context.Context, vote *models.ArenaVote) error 
 		if err != nil {
 			return fmt.Errorf("complete battle: %w", err)
 		}
+		if err := settleArenaStakeTx(ctx, tx, vote.BattleID, overallWinner); err != nil {
+			return fmt.Errorf("settle completed battle stake: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
+}
+
+// ArenaDeadlineTransition describes the durable state change produced by an
+// expired round. OpenedRound is non-zero only when the sweep itself advanced
+// the battle; Completed is true only for the sweep that finalized it.
+type ArenaDeadlineTransition struct {
+	BattleID    string
+	ClosedRound int
+	OpenedRound int
+	Completed   bool
+}
+
+// ProcessExpiredRounds closes the earliest expired, still-open round for each
+// active/pending battle. Rows are locked with SKIP LOCKED so multiple API
+// replicas can run the same ticker without processing a deadline twice.
+func (r *ArenaRepo) ProcessExpiredRounds(ctx context.Context, now time.Time, limit int) ([]ArenaDeadlineTransition, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin arena deadline sweep: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	type candidate struct {
+		roundID     string
+		battleID    string
+		roundNumber int
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT ar.id, ar.battle_id, ar.round_number
+		FROM arena_rounds ar
+		JOIN arena_battles ab ON ab.id = ar.battle_id
+		WHERE ar.closed_at IS NULL
+		  AND ar.deadline IS NOT NULL
+		  AND ar.deadline <= $1
+		  AND ab.status IN ('pending', 'active')
+		  AND NOT EXISTS (
+			SELECT 1 FROM arena_rounds earlier
+			WHERE earlier.battle_id = ar.battle_id
+			  AND earlier.round_number < ar.round_number
+			  AND earlier.closed_at IS NULL
+		  )
+		ORDER BY ar.deadline ASC, ar.battle_id, ar.round_number
+		FOR UPDATE OF ar SKIP LOCKED
+		LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select expired arena rounds: %w", err)
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.roundID, &c.battleID, &c.roundNumber); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan expired arena round: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate expired arena rounds: %w", err)
+	}
+	rows.Close()
+
+	transitions := make([]ArenaDeadlineTransition, 0, len(candidates))
+	for _, c := range candidates {
+		var status models.ArenaStatus
+		var currentRound, totalRounds int
+		var agentAID, agentBID string
+		if err := tx.QueryRow(ctx, `
+			SELECT status, current_round, total_rounds, agent_a_id, agent_b_id
+			FROM arena_battles WHERE id = $1 FOR UPDATE`, c.battleID,
+		).Scan(&status, &currentRound, &totalRounds, &agentAID, &agentBID); err != nil {
+			return nil, fmt.Errorf("lock expired arena battle: %w", err)
+		}
+		if status == models.ArenaStatusCompleted || status == models.ArenaStatusCancelled {
+			continue
+		}
+
+		var agentAVotes, agentBVotes int
+		if err := tx.QueryRow(ctx, `
+			SELECT
+				COUNT(*) FILTER (WHERE voted_for = $2),
+				COUNT(*) FILTER (WHERE voted_for = $3)
+			FROM arena_votes WHERE round_id = $1`, c.roundID, agentAID, agentBID,
+		).Scan(&agentAVotes, &agentBVotes); err != nil {
+			return nil, fmt.Errorf("count expired round votes: %w", err)
+		}
+		var roundWinner *string
+		if agentAVotes > agentBVotes {
+			roundWinner = &agentAID
+		} else if agentBVotes > agentAVotes {
+			roundWinner = &agentBID
+		}
+
+		result, err := tx.Exec(ctx, `
+			UPDATE arena_rounds SET
+				round_winner = $2,
+				agent_a_argument_score = COALESCE((SELECT AVG(argument_score)::FLOAT FROM arena_votes WHERE round_id = $1 AND voted_for = $3), 0),
+				agent_a_source_score = COALESCE((SELECT AVG(source_score)::FLOAT FROM arena_votes WHERE round_id = $1 AND voted_for = $3), 0),
+				agent_a_clarity_score = COALESCE((SELECT AVG(clarity_score)::FLOAT FROM arena_votes WHERE round_id = $1 AND voted_for = $3), 0),
+				agent_a_total_votes = $4,
+				agent_b_argument_score = COALESCE((SELECT AVG(argument_score)::FLOAT FROM arena_votes WHERE round_id = $1 AND voted_for = $5), 0),
+				agent_b_source_score = COALESCE((SELECT AVG(source_score)::FLOAT FROM arena_votes WHERE round_id = $1 AND voted_for = $5), 0),
+				agent_b_clarity_score = COALESCE((SELECT AVG(clarity_score)::FLOAT FROM arena_votes WHERE round_id = $1 AND voted_for = $5), 0),
+				agent_b_total_votes = $6,
+				closed_at = $7,
+				closure_reason = 'deadline'
+			WHERE id = $1 AND closed_at IS NULL`,
+			c.roundID, roundWinner, agentAID, agentAVotes, agentBID, agentBVotes, now)
+		if err != nil {
+			return nil, fmt.Errorf("close expired arena round: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			continue
+		}
+
+		transition := ArenaDeadlineTransition{BattleID: c.battleID, ClosedRound: c.roundNumber}
+		var closedRounds int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM arena_rounds WHERE battle_id = $1 AND closed_at IS NOT NULL`, c.battleID).Scan(&closedRounds); err != nil {
+			return nil, fmt.Errorf("count closed arena rounds: %w", err)
+		}
+		if closedRounds >= totalRounds {
+			var agentAWins, agentBWins int
+			if err := tx.QueryRow(ctx, `
+				SELECT
+					COUNT(*) FILTER (WHERE round_winner = $2),
+					COUNT(*) FILTER (WHERE round_winner = $3)
+				FROM arena_rounds WHERE battle_id = $1`, c.battleID, agentAID, agentBID,
+			).Scan(&agentAWins, &agentBWins); err != nil {
+				return nil, fmt.Errorf("count expired battle wins: %w", err)
+			}
+			var overallWinner *string
+			if agentAWins > agentBWins {
+				overallWinner = &agentAID
+			} else if agentBWins > agentAWins {
+				overallWinner = &agentBID
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE arena_battles
+				SET status = 'completed', winner_id = $2, completed_at = $3
+				WHERE id = $1 AND status IN ('pending', 'active')`, c.battleID, overallWinner, now); err != nil {
+				return nil, fmt.Errorf("complete expired arena battle: %w", err)
+			}
+			if err := settleArenaStakeTx(ctx, tx, c.battleID, overallWinner); err != nil {
+				return nil, fmt.Errorf("settle expired arena battle stake: %w", err)
+			}
+			transition.Completed = true
+		} else if c.roundNumber < totalRounds && currentRound < c.roundNumber+1 {
+			transition.OpenedRound = c.roundNumber + 1
+			if _, err := tx.Exec(ctx, `
+				UPDATE arena_battles SET status = 'active', current_round = $2 WHERE id = $1`,
+				c.battleID, transition.OpenedRound); err != nil {
+				return nil, fmt.Errorf("advance expired arena battle: %w", err)
+			}
+		}
+		transitions = append(transitions, transition)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit arena deadline sweep: %w", err)
+	}
+	return transitions, nil
 }
 
 // GetVotes returns all votes for a specific round.
@@ -685,7 +996,7 @@ func (r *ArenaRepo) GetRoundByBattleAndNumber(ctx context.Context, battleID stri
 		       agent_a_source_score, agent_b_source_score,
 		       agent_a_clarity_score, agent_b_clarity_score,
 		       agent_a_total_votes, agent_b_total_votes,
-		       round_winner, deadline, created_at
+		       round_winner, deadline, closed_at, COALESCE(closure_reason, ''), created_at
 		FROM arena_rounds
 		WHERE battle_id = $1 AND round_number = $2`,
 		battleID, roundNumber,
@@ -697,7 +1008,7 @@ func (r *ArenaRepo) GetRoundByBattleAndNumber(ctx context.Context, battleID stri
 		&rd.AgentASourceScore, &rd.AgentBSourceScore,
 		&rd.AgentAClarityScore, &rd.AgentBClarityScore,
 		&rd.AgentATotalVotes, &rd.AgentBTotalVotes,
-		&rd.RoundWinner, &rd.Deadline, &rd.CreatedAt,
+		&rd.RoundWinner, &rd.Deadline, &rd.ClosedAt, &rd.ClosureReason, &rd.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get arena round: %w", err)

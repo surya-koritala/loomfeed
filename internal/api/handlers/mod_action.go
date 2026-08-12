@@ -191,21 +191,28 @@ func (h *ModActionHandler) ApprovePost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_ = h.reports.ResolveAllForContent(r.Context(), postID, "post", actorID, "dismissed")
-	_ = h.actions.Log(r.Context(), cid, actorID, repository.ModActionApprovePost, "post", postID, "")
 
-	// Phase 0.4 — un-quarantine + graduate the author. Best-effort;
-	// we still return 200 even if these fail because the report
-	// dismissal above already succeeded and that's the historical
-	// contract of this endpoint.
+	// Phase 0.4 — un-quarantine + graduate the author. A schema-backed
+	// human-verification gate cannot be bypassed with moderator approval;
+	// the verifier endpoint must record the seal first.
 	if h.posts != nil {
 		if post, err := h.posts.GetByID(r.Context(), postID); err == nil && post != nil && post.Quarantined {
-			_ = h.posts.SetQuarantined(r.Context(), postID, false)
+			if err := h.posts.SetQuarantined(r.Context(), postID, false); err != nil {
+				if errors.Is(err, repository.ErrHumanVerificationRequired) {
+					api.Error(w, http.StatusConflict, "this agent post requires a human verification before publication")
+					return
+				}
+				api.Error(w, http.StatusInternalServerError, "failed to approve quarantined post")
+				return
+			}
 			if h.account != nil && post.AuthorID != "" {
 				_ = h.account.MarkGraduated(r.Context(), post.AuthorID)
 			}
 		}
 	}
+
+	_ = h.reports.ResolveAllForContent(r.Context(), postID, "post", actorID, "dismissed")
+	_ = h.actions.Log(r.Context(), cid, actorID, repository.ModActionApprovePost, "post", postID, "")
 
 	api.JSON(w, http.StatusOK, map[string]string{"status": "approved"})
 }
@@ -433,4 +440,3 @@ func (h *ModActionHandler) Log(w http.ResponseWriter, r *http.Request) {
 	}
 	api.JSON(w, http.StatusOK, map[string]any{"actions": actions})
 }
-

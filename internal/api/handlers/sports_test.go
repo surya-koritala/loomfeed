@@ -25,7 +25,7 @@ func setupSportsTest(t *testing.T) (*handlers.SportsHandler, *repository.SportsR
 	t.Helper()
 	pool := database.TestPool(t)
 	database.CleanupTables(t, pool,
-		"sports_predictions", "sports_prediction_stats", "sports_matches",
+		"predictions", "prediction_stats", "sports_matches",
 		"agent_identities", "human_users", "participants")
 	sportsRepo := repository.NewSportsRepo(pool)
 	participants := repository.NewParticipantRepo(pool)

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import { resolveGoShortcut } from '../lib/keyboard-navigation'
 
 /**
  * Global keyboard shortcut listener. Mount once near the app root.
@@ -147,15 +148,14 @@ export default function KeyboardShortcuts() {
       if (gPending) {
         const map: Record<string, string | (() => void)> = {
           h: '/',
-          f: '/feed',
-          t: '/trending',
           c: '/communities',
           a: '/agents',
           n: '/notifications',
           p: handleMyProfile,
           s: '/settings',
         }
-        const target = map[e.key.toLowerCase()]
+        const key = e.key.toLowerCase()
+        const target = resolveGoShortcut(key) ?? map[key]
         if (target !== undefined) {
           if (typeof target === 'string') navigate(target)
           else target()

@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -41,7 +42,7 @@ func seedPosts(t *testing.T, posts *repository.PostRepo, communityID, authorID s
 			AuthorType:  models.ParticipantHuman,
 			Title:       "Feed Post",
 			Body:        "Feed post body",
-			PostType: models.PostTypeText,
+			PostType:    models.PostTypeText,
 		})
 		if err != nil {
 			t.Fatalf("creating seed post %d: %v", i, err)
@@ -69,6 +70,53 @@ func TestFeedHandler_Global_Success(t *testing.T) {
 	}
 	if resp.Limit != 10 {
 		t.Errorf("expected limit 10, got %d", resp.Limit)
+	}
+}
+
+func TestFeedHandler_Global_CursorIsOpaqueAndStableAcrossInsert(t *testing.T) {
+	handler, participants, communities, postsRepo, cfg := setupFeedTest(t)
+	participant, _ := registerTestUser(t, participants, cfg, "feed-cursor@example.com", "Feed Cursor")
+	community := createTestCommunity(t, communities, participant.ID, "feed-cursor-test")
+	seedPosts(t, postsRepo, community.ID, participant.ID, 4)
+
+	type feedPage struct {
+		Data       []models.PostWithAuthor `json:"data"`
+		NextCursor string                  `json:"next_cursor"`
+	}
+
+	firstRec := httptest.NewRecorder()
+	handler.Global(firstRec, httptest.NewRequest(http.MethodGet, "/api/v1/feed?sort=new&limit=2", nil))
+	testutil.AssertStatus(t, firstRec, http.StatusOK)
+	var first feedPage
+	if err := json.Unmarshal(firstRec.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first cursor page: %v", err)
+	}
+	if len(first.Data) != 2 {
+		t.Fatalf("expected two posts on first page, got %d", len(first.Data))
+	}
+	_, cursorID, ok := handlers.DecodeCursor(first.NextCursor)
+	if !ok || cursorID != first.Data[len(first.Data)-1].ID {
+		t.Fatalf("expected opaque cursor for last post %s, got %q", first.Data[len(first.Data)-1].ID, first.NextCursor)
+	}
+
+	// A newly inserted post sorts before page one and must not shift the
+	// continuation window as it would with OFFSET pagination.
+	seedPosts(t, postsRepo, community.ID, participant.ID, 1)
+	secondRec := httptest.NewRecorder()
+	handler.Global(secondRec, httptest.NewRequest(http.MethodGet, "/api/v1/feed?sort=new&limit=2&cursor="+first.NextCursor, nil))
+	testutil.AssertStatus(t, secondRec, http.StatusOK)
+	var second feedPage
+	if err := json.Unmarshal(secondRec.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode second cursor page: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, post := range first.Data {
+		seen[post.ID] = true
+	}
+	for _, post := range second.Data {
+		if seen[post.ID] {
+			t.Fatalf("cursor page repeated post %s after concurrent insert", post.ID)
+		}
 	}
 }
 

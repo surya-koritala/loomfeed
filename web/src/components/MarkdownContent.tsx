@@ -4,15 +4,33 @@ import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import dynamic from 'next/dynamic'
 import EmbedRenderer from './EmbedRenderer'
 import LinkPreview from './LinkPreview'
 import SortableTable from './SortableTable'
-import 'katex/dist/katex.min.css'
+import { hasRenderableMath } from '../lib/markdown-math'
 
 const MermaidDiagram = dynamic(() => import('./MermaidDiagram'), { ssr: false })
+
+type RehypeKatexPlugin = (typeof import('rehype-katex'))['default']
+
+let loadedKatexPlugin: RehypeKatexPlugin | null = null
+let katexAssetsPromise: Promise<RehypeKatexPlugin> | null = null
+
+function loadKatexAssets(): Promise<RehypeKatexPlugin> {
+  if (loadedKatexPlugin) return Promise.resolve(loadedKatexPlugin)
+  if (!katexAssetsPromise) {
+    katexAssetsPromise = Promise.all([
+      import('rehype-katex'),
+      import('katex/dist/katex.min.css'),
+    ]).then(([module]) => {
+      loadedKatexPlugin = module.default
+      return loadedKatexPlugin
+    })
+  }
+  return katexAssetsPromise
+}
 
 // Markdown sanitization schema. Built on top of rehype-sanitize's
 // defaults (`defaultSchema`) — GFM-safe tag/attribute allowlists —
@@ -210,12 +228,36 @@ function preprocessMentions(md: string): string {
 }
 
 export default function MarkdownContent({ content, className, bodyLinkPreviews }: MarkdownContentProps) {
+  const processedContent = React.useMemo(
+    () => preprocessMentions(preprocessCallouts(preprocessMath(preprocessImages(escapeDollarAmounts(content))))),
+    [content],
+  )
+  const needsKatex = React.useMemo(() => hasRenderableMath(content), [content])
+  const [katexPlugin, setKatexPlugin] = React.useState<RehypeKatexPlugin | null>(loadedKatexPlugin)
+
+  React.useEffect(() => {
+    if (!needsKatex || katexPlugin) return
+    let cancelled = false
+    void loadKatexAssets()
+      .then((plugin) => {
+        if (!cancelled) setKatexPlugin(() => plugin)
+      })
+      .catch(() => {
+        // Preserve the readable remark-math fallback if the optional chunk
+        // cannot load; a later math render may retry after navigation.
+        katexAssetsPromise = null
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [needsKatex, katexPlugin])
+
   return (
     <div className={`markdown-body ${className ?? ''}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[
-          rehypeKatex,
+          ...(katexPlugin ? [katexPlugin] : []),
           [rehypeSanitize, sanitizeSchema],
         ]}
         components={{
@@ -330,7 +372,7 @@ export default function MarkdownContent({ content, className, bodyLinkPreviews }
           },
         }}
       >
-        {preprocessMentions(preprocessCallouts(preprocessMath(preprocessImages(escapeDollarAmounts(content)))))}
+        {processedContent}
       </ReactMarkdown>
     </div>
   )

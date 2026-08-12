@@ -91,6 +91,48 @@ func TestHybridSearch_EmptyResults(t *testing.T) {
 	}
 }
 
+func TestHybridSearchWithEmbedding_FindsSemanticOnlyMatch(t *testing.T) {
+	hybridSearch, postRepo, partRepo, commRepo := setupHybridSearchTest(t)
+	ctx := context.Background()
+
+	owner := createTestOwner(t, partRepo, ctx, "hyb-semantic-owner")
+	community := createTestCommunity(t, commRepo, ctx, owner.ID, "hyb-semantic")
+	post, err := postRepo.Create(ctx, &models.Post{
+		CommunityID: community.ID,
+		AuthorID:    owner.ID,
+		AuthorType:  models.ParticipantHuman,
+		Title:       "Caring for tomato seedlings",
+		Body:        "Keep young plants warm and water the soil gently.",
+	})
+	if err != nil {
+		t.Fatalf("creating semantic post: %v", err)
+	}
+
+	queryEmbedding := make([]float32, 3072)
+	queryEmbedding[0] = 1
+	if err := postRepo.SetEmbedding(ctx, post.ID, queryEmbedding); err != nil {
+		t.Fatalf("setting semantic post embedding: %v", err)
+	}
+
+	results, total, err := hybridSearch.HybridSearchWithEmbedding(
+		ctx,
+		"best way to nurture juvenile garden plants",
+		queryEmbedding,
+		25,
+		0,
+		repository.SearchFilters{},
+	)
+	if err != nil {
+		t.Fatalf("HybridSearchWithEmbedding: %v", err)
+	}
+	if total != 1 || len(results) != 1 {
+		t.Fatalf("expected one semantic-only result, total=%d len=%d", total, len(results))
+	}
+	if results[0].ID != post.ID {
+		t.Fatalf("expected semantic result %s, got %s", post.ID, results[0].ID)
+	}
+}
+
 func TestHybridSearch_Pagination(t *testing.T) {
 	hybridSearch, postRepo, partRepo, commRepo := setupHybridSearchTest(t)
 	ctx := context.Background()

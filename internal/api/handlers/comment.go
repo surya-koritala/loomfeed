@@ -19,8 +19,8 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/events"
 	"github.com/surya-koritala/loomfeed/internal/loom"
 	"github.com/surya-koritala/loomfeed/internal/mention"
-	"github.com/surya-koritala/loomfeed/internal/modfilter"
 	"github.com/surya-koritala/loomfeed/internal/models"
+	"github.com/surya-koritala/loomfeed/internal/modfilter"
 	"github.com/surya-koritala/loomfeed/internal/ratelimit"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 	"github.com/surya-koritala/loomfeed/internal/webhook"
@@ -466,10 +466,10 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				// Dispatch webhook + SSE for mention.
 				if h.dispatcher != nil {
 					payload := map[string]any{
-						"comment_id":    cID,
-						"post_id":       postIDCopy,
-						"mentioned_by":  commenterID,
-						"mentioned_id":  p.ID,
+						"comment_id":   cID,
+						"post_id":      postIDCopy,
+						"mentioned_by": commenterID,
+						"mentioned_id": p.ID,
 					}
 					h.dispatcher.Dispatch("mention", payload)
 					if h.hub != nil {
@@ -510,8 +510,9 @@ func (h *CommentHandler) ListByPost(w http.ResponseWriter, r *http.Request) {
 
 	limit := parseIntQuery(r, "limit", 25)
 	offset := parseIntQuery(r, "offset", 0)
+	cursor := decodeCursorID(r.URL.Query().Get("cursor"))
 
-	comments, err := h.comments.ListByPost(r.Context(), postID, sort, limit, offset, mode, threadType)
+	comments, err := h.comments.ListByPost(r.Context(), postID, sort, limit, offset, mode, threadType, cursor)
 	if err != nil {
 		api.Error(w, http.StatusInternalServerError, "failed to list comments")
 		return
@@ -545,6 +546,15 @@ func (h *CommentHandler) ListByPost(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// Keep the long-standing bare-array body compatible. Cursor-aware clients
+	// read the continuation token from the header; OFFSET remains accepted for
+	// one deprecation cycle.
+	if len(comments) == limit && len(comments) > 0 {
+		last := comments[len(comments)-1]
+		w.Header().Set("X-Next-Cursor", EncodeCursor(last.CreatedAt, last.ID))
+		w.Header().Set("Access-Control-Expose-Headers", "X-Next-Cursor")
 	}
 
 	api.JSON(w, http.StatusOK, comments)

@@ -7,6 +7,10 @@ type ParticipantType string
 const (
 	ParticipantHuman ParticipantType = "human"
 	ParticipantAgent ParticipantType = "agent"
+	// ParticipantRemote represents a materialized ActivityPub actor. It has no
+	// login or API-key row and exists only so federated comments/votes reuse the
+	// normal content and author-rendering paths.
+	ParticipantRemote ParticipantType = "remote"
 	// ParticipantLoom is the platform-operated AI summoned via @loom.
 	// One canonical participant row authors every Loom reply so
 	// threading / voting / reactions reuse the existing comment
@@ -44,14 +48,14 @@ type Participant struct {
 
 type HumanUser struct {
 	Participant
-	Email              string     `json:"-" db:"email"`
-	PasswordHash       string     `json:"-" db:"password_hash"`
-	OAuthProvider      string     `json:"oauth_provider,omitempty" db:"oauth_provider"`
-	PreferredLanguage  string     `json:"preferred_language,omitempty" db:"preferred_language"`
-	NotificationPrefs  string     `json:"notification_prefs,omitempty" db:"notification_prefs"`
-	FailedLoginCount   int        `json:"-" db:"failed_login_count"`
-	LockedUntil        *time.Time `json:"-" db:"locked_until"`
-	LastLoginAt        *time.Time `json:"last_login_at,omitempty" db:"last_login_at"`
+	Email             string     `json:"-" db:"email"`
+	PasswordHash      string     `json:"-" db:"password_hash"`
+	OAuthProvider     string     `json:"oauth_provider,omitempty" db:"oauth_provider"`
+	PreferredLanguage string     `json:"preferred_language,omitempty" db:"preferred_language"`
+	NotificationPrefs string     `json:"notification_prefs,omitempty" db:"notification_prefs"`
+	FailedLoginCount  int        `json:"-" db:"failed_login_count"`
+	LockedUntil       *time.Time `json:"-" db:"locked_until"`
+	LastLoginAt       *time.Time `json:"last_login_at,omitempty" db:"last_login_at"`
 	// Invite loop — set at CreateHuman when the signup came through
 	// an invite link. Empty string means organic signup.
 	InvitedByParticipantID string `json:"-" db:"invited_by_participant_id"`

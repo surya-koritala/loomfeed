@@ -33,7 +33,7 @@ func floatPtr(f float64) *float64 { return &f }
 
 func TestSportsUpsertMatch_InsertThenUpdate(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "sports_predictions", "sports_prediction_stats", "sports_matches", "participants")
+	database.CleanupTables(t, pool, "predictions", "prediction_stats", "sports_matches", "participants")
 
 	repo := repository.NewSportsRepo(pool)
 	ctx := context.Background()
@@ -91,7 +91,7 @@ func TestSportsUpsertMatch_InsertThenUpdate(t *testing.T) {
 
 func TestSportsUpsertPrediction_BeforeKickoff(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "sports_predictions", "sports_prediction_stats", "sports_matches", "participants")
+	database.CleanupTables(t, pool, "predictions", "prediction_stats", "sports_matches", "participants")
 
 	pRepo := repository.NewParticipantRepo(pool)
 	repo := repository.NewSportsRepo(pool)
@@ -157,7 +157,7 @@ func TestSportsUpsertPrediction_BeforeKickoff(t *testing.T) {
 
 func TestSportsUpsertPrediction_AfterKickoff(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "sports_predictions", "sports_prediction_stats", "sports_matches", "participants")
+	database.CleanupTables(t, pool, "predictions", "prediction_stats", "sports_matches", "participants")
 
 	pRepo := repository.NewParticipantRepo(pool)
 	repo := repository.NewSportsRepo(pool)
@@ -192,7 +192,7 @@ func TestSportsUpsertPrediction_AfterKickoff(t *testing.T) {
 
 func TestSportsSettleMatch_GradesAndIsIdempotent(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "sports_predictions", "sports_prediction_stats", "sports_matches", "participants")
+	database.CleanupTables(t, pool, "predictions", "prediction_stats", "sports_matches", "participants")
 
 	pRepo := repository.NewParticipantRepo(pool)
 	repo := repository.NewSportsRepo(pool)
@@ -284,7 +284,7 @@ func TestSportsSettleMatch_GradesAndIsIdempotent(t *testing.T) {
 		t.Helper()
 		var s statsRow
 		err := pool.QueryRow(ctx, `
-			SELECT n, correct, brier_sum, streak FROM sports_prediction_stats
+			SELECT n, correct, brier_sum, streak FROM prediction_stats
 			WHERE participant_id = $1`, participantID,
 		).Scan(&s.n, &s.correct, &s.brierSum, &s.streak)
 		if err != nil {
@@ -331,7 +331,7 @@ func TestSportsSettleMatch_GradesAndIsIdempotent(t *testing.T) {
 
 func TestSportsLeaderboard_MinN(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "sports_predictions", "sports_prediction_stats", "sports_matches", "participants")
+	database.CleanupTables(t, pool, "predictions", "prediction_stats", "sports_matches", "participants")
 
 	pRepo := repository.NewParticipantRepo(pool)
 	repo := repository.NewSportsRepo(pool)
@@ -341,7 +341,7 @@ func TestSportsLeaderboard_MinN(t *testing.T) {
 	agent := createTestAgent(t, pRepo, ctx, owner.ID, "sports-lb")
 
 	_, err := pool.Exec(ctx, `
-		INSERT INTO sports_prediction_stats (participant_id, predictor_kind, n, correct, brier_sum, streak)
+		INSERT INTO prediction_stats (participant_id, predictor_kind, n, correct, brier_sum, streak)
 		VALUES ($1, 'agent', 4, 3, 0.8, 2)`, agent.ID)
 	if err != nil {
 		t.Fatalf("seed stats: %v", err)

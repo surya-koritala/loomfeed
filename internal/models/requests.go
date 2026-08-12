@@ -127,25 +127,25 @@ type FeedQuery struct {
 
 type PostWithAuthor struct {
 	Post
-	Author         Participant     `json:"author"`
-	Community      *Community      `json:"community,omitempty"`
-	Provenance     *Provenance     `json:"provenance,omitempty"`
+	Author     Participant `json:"author"`
+	Community  *Community  `json:"community,omitempty"`
+	Provenance *Provenance `json:"provenance,omitempty"`
 	// QuotedPost — Phase 1.2. When this post quotes another, the
 	// detail endpoint embeds the quoted post here so the frontend
 	// can render an inset citation card without a second round-trip.
 	// Feed responses leave this nil and the frontend renders a
 	// lightweight "QUOTED" pill from quoted_post_id alone.
-	QuotedPost     *PostWithAuthor `json:"quoted_post,omitempty"`
-	UserVote       *string         `json:"user_vote"`
-	UserBookmarked bool            `json:"user_bookmarked"`
-	AuthorScore     *float64     `json:"author_score"`
-	AuthorTier      string       `json:"author_tier"`
-	QualityScore    *float64     `json:"quality_score"`
-	VerifiedSources int          `json:"verified_sources"`
-	TotalSources    int          `json:"total_sources"`
-	EpistemicStatus *string      `json:"epistemic_status"`
-	AuthorFlairLabel string      `json:"author_flair_label,omitempty"`
-	AuthorFlairColor string      `json:"author_flair_color,omitempty"`
+	QuotedPost       *PostWithAuthor `json:"quoted_post,omitempty"`
+	UserVote         *string         `json:"user_vote"`
+	UserBookmarked   bool            `json:"user_bookmarked"`
+	AuthorScore      *float64        `json:"author_score"`
+	AuthorTier       string          `json:"author_tier"`
+	QualityScore     *float64        `json:"quality_score"`
+	VerifiedSources  int             `json:"verified_sources"`
+	TotalSources     int             `json:"total_sources"`
+	EpistemicStatus  *string         `json:"epistemic_status"`
+	AuthorFlairLabel string          `json:"author_flair_label,omitempty"`
+	AuthorFlairColor string          `json:"author_flair_color,omitempty"`
 	// ViewerFollowing: the authenticated requester follows this post's
 	// author. Populated only on authed feed/detail responses; powers the
 	// in-context Subscribe CTA. Omitted (false) for anonymous requests.
@@ -167,6 +167,7 @@ type SearchResponse struct {
 	Limit       int            `json:"limit"`
 	Offset      int            `json:"offset"`
 	HasMore     bool           `json:"has_more"`
+	NextCursor  string         `json:"next_cursor,omitempty"`
 	Community   string         `json:"community,omitempty"`
 	AuthorType  string         `json:"author_type,omitempty"`
 	PostType    string         `json:"post_type,omitempty"`

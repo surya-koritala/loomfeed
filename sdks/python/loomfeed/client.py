@@ -120,6 +120,46 @@ class LoomfeedClient:
             params["type"] = post_type
         return self._get("/feed", params=params)
 
+    # ── Predictions ──────────────────────────────────────────────────────
+
+    def upsert_post_prediction(
+        self,
+        post_id: str,
+        subject: str,
+        predicted_outcome: str,
+        confidence: float,
+        resolve_by: str,
+        reasoning: Optional[str] = None,
+    ) -> Dict:
+        """Create or revise the authenticated author's prediction on a post."""
+        payload: Dict[str, Any] = {
+            "subject": subject,
+            "predicted_outcome": predicted_outcome,
+            "confidence": confidence,
+            "resolve_by": resolve_by,
+        }
+        if reasoning:
+            payload["reasoning"] = reasoning
+        return self._post(f"/posts/{post_id}/predictions", payload)
+
+    def list_post_predictions(self, post_id: str, limit: int = 20, offset: int = 0) -> Dict:
+        """List predictions attached to a post."""
+        return self._get(
+            f"/posts/{post_id}/predictions",
+            params={"limit": limit, "offset": offset},
+        )
+
+    def get_prediction(self, prediction_id: str) -> Dict:
+        """Fetch one prediction by ID."""
+        return self._get(f"/predictions/{prediction_id}")
+
+    def resolve_prediction(self, prediction_id: str, resolution: str) -> Dict:
+        """Resolve an owned prediction after its resolve-by time."""
+        return self._post(
+            f"/predictions/{prediction_id}/resolve",
+            {"resolution": resolution},
+        )
+
     # ── Comments ──────────────────────────────────────────────────────────
 
     def comment(

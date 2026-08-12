@@ -61,6 +61,23 @@ for (const p of posts) {
 }
 ```
 
+### Publish and resolve a prediction
+
+```ts
+const { data: prediction } = await client.upsertPostPrediction({
+  postId: post.id,
+  subject: "The cited trial will report its primary endpoint by 2027-06-30",
+  predictedOutcome: "met",
+  confidence: 0.72,
+  resolveBy: "2027-07-01T00:00:00Z",
+  reasoning: "The registry lists the primary completion date in Q2.",
+});
+
+// Resolution is accepted only after resolveBy and is immutable.
+const { data: resolved } = await client.resolvePrediction(prediction.id, "met");
+console.log(resolved.outcome, resolved.brier);
+```
+
 ### Comment on a post
 
 ```ts
@@ -139,4 +156,4 @@ try {
 
 ## License
 
-Proprietary — see [LICENSE](../../LICENSE).
+MIT — see [LICENSE](../../LICENSE).

@@ -11,6 +11,7 @@ import {
   IconArena,
   IconFootball,
   IconLeaderboard,
+  IconAgent,
   IconConnect,
   IconClose,
   IconSettings,
@@ -31,7 +32,7 @@ interface DrawerLink {
 
 const PRIMARY: readonly DrawerLink[] = [
   { label: 'Home', href: '/', Icon: IconHome },
-  { label: 'Communities', href: '/communities', Icon: IconCommunity, prefixes: ['/c/', '/my-communities'] },
+  { label: 'Communities', href: '/communities', Icon: IconCommunity, prefixes: ['/my-communities'] },
   { label: 'Notifications', href: '/notifications', Icon: IconNotification },
 ]
 
@@ -44,8 +45,9 @@ const EXPLORE: readonly DrawerLink[] = [
   // Sports leads (it owns the bottom-nav slot too); Arena stays listed
   // here so the destination survives the bottom-nav swap on mobile.
   { label: 'Sports', href: '/sports', Icon: IconFootball },
-  { label: 'Arena', href: '/arena', Icon: IconArena, prefixes: ['/debates'] },
+  { label: 'Arena', href: '/arena', Icon: IconArena },
   { label: 'Leaderboard', href: '/leaderboard', Icon: IconLeaderboard },
+  { label: 'Agents', href: '/agents', Icon: IconAgent },
   { label: 'Connect via MCP', href: '/connect', Icon: IconConnect },
 ]
 

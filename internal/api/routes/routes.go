@@ -11,21 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	"github.com/surya-koritala/loomfeed/internal/activitypub"
 	"github.com/surya-koritala/loomfeed/internal/api"
 	"github.com/surya-koritala/loomfeed/internal/api/handlers"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
 	"github.com/surya-koritala/loomfeed/internal/cache"
 	"github.com/surya-koritala/loomfeed/internal/config"
 	cryptopkg "github.com/surya-koritala/loomfeed/internal/crypto"
+	"github.com/surya-koritala/loomfeed/internal/curatedshorts"
 	emailPkg "github.com/surya-koritala/loomfeed/internal/email"
 	"github.com/surya-koritala/loomfeed/internal/events"
-	"github.com/surya-koritala/loomfeed/internal/loom"
 	a2agateway "github.com/surya-koritala/loomfeed/internal/gateway/a2a"
 	mcpgateway "github.com/surya-koritala/loomfeed/internal/gateway/mcp"
-	modpkg "github.com/surya-koritala/loomfeed/internal/moderation"
-	"github.com/surya-koritala/loomfeed/internal/activitypub"
-	"github.com/surya-koritala/loomfeed/internal/curatedshorts"
 	"github.com/surya-koritala/loomfeed/internal/indexnow"
+	"github.com/surya-koritala/loomfeed/internal/loom"
+	modpkg "github.com/surya-koritala/loomfeed/internal/moderation"
 	"github.com/surya-koritala/loomfeed/internal/provenance"
 	"github.com/surya-koritala/loomfeed/internal/push"
 	"github.com/surya-koritala/loomfeed/internal/quality"
@@ -38,6 +38,7 @@ import (
 func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts ...any) {
 	dir := "uploads"
 	var redisCache *cache.RedisCache
+	var hub *events.Hub
 	for _, o := range opts {
 		switch v := o.(type) {
 		case string:
@@ -46,7 +47,12 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 			}
 		case *cache.RedisCache:
 			redisCache = v
+		case *events.Hub:
+			hub = v
 		}
+	}
+	if hub == nil {
+		hub = events.NewHub()
 	}
 	// Repositories
 	participants := repository.NewParticipantRepo(pool)
@@ -66,6 +72,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	reports := repository.NewReportRepo(pool)
 	reputation := repository.NewReputationRepo(pool)
 	moderation := repository.NewModerationRepo(pool)
+	qualityGates := repository.NewQualityGateRepo(pool)
 	modActions := repository.NewModActionRepo(pool)
 	webhooks := repository.NewWebhookRepo(pool)
 	messages := repository.NewMessageRepo(pool)
@@ -79,9 +86,9 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	follows := repository.NewFollowRepo(pool)
 	arenaRepo := repository.NewArenaRepo(pool)
 	sportsRepo := repository.NewSportsRepo(pool)
+	predictionRepo := repository.NewPredictionRepo(pool)
 
 	// Event hub and webhook dispatcher
-	hub := events.NewHub()
 	dispatcher := webhook.NewDispatcher(webhooks)
 
 	// newLimiter picks the rate-limit backend at startup. With Redis
@@ -131,6 +138,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	postH.WithCache(redisCache)
 	postH.WithVotes(votes)
 	postH.WithQualityChecker(quality.NewChecker(pool))
+	postH.WithQualityGates(qualityGates)
 	postH.WithMentions(mentions, notifications)
 	postH.WithBlocks(blocks)
 	postH.WithAccount(accountRepo)
@@ -141,10 +149,12 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	// deployment name (LLM_EMBED_DEPLOYMENT). Nil-safe: without
 	// credentials, posts ship without embeddings and the backfill
 	// CLI handles them later.
+	var searchEmbedder loom.Embedder
 	if cfg.LLM.Endpoint != "" && cfg.LLM.APIKey != "" && cfg.LLM.EmbedDeployment != "" {
-		postH.WithEmbedder(loom.NewAzureEmbedClient(
+		searchEmbedder = loom.NewAzureEmbedClient(
 			cfg.LLM.Endpoint, cfg.LLM.APIKey, cfg.LLM.EmbedDeployment,
-		))
+		)
+		postH.WithEmbedder(searchEmbedder)
 	}
 	provStatsRepo := repository.NewProvenanceStatsRepo(pool)
 	provStatsSvc := provenance.NewService(provStatsRepo)
@@ -198,6 +208,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	communityH.WithCache(redisCache)
 	editH := handlers.NewEditHandler(posts, comments, revisions, cfg)
 	editH.WithModeration(moderation)
+	editH.WithScorecardTrigger(hub)
 	reactionH := handlers.NewReactionHandler(reactions, posts, comments, reputation, cfg)
 	statsH := handlers.NewStatsHandler(pool)
 	statsH.WithCache(redisCache)
@@ -206,6 +217,9 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	searchH := handlers.NewSearchHandler(search, hybridSearch)
 	searchH.WithSuggest(repository.NewSuggestRepo(pool))
 	searchH.WithFollows(follows)
+	if searchEmbedder != nil {
+		searchH.WithEmbedder(searchEmbedder)
+	}
 	notifH := handlers.NewNotificationHandler(notifications, cfg)
 	profileH := handlers.NewProfileHandler(profiles, reputation, cfg)
 	profileH.WithParticipants(participants)
@@ -236,6 +250,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	reportH := handlers.NewReportHandler(reports)
 	linkPreviewH := handlers.NewLinkPreviewHandler()
 	modH := handlers.NewModerationHandler(moderation, communities, reports, cfg)
+	modH.WithQualityGates(qualityGates)
 	modActionH := handlers.NewModActionHandler(modActions, moderation, communities, reports)
 	modActionH.WithPostsAndAccount(posts, accountRepo)
 	webhookH := handlers.NewWebhookHandler(webhooks, dispatcher)
@@ -259,8 +274,11 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 
 	arenaH := handlers.NewArenaHandler(arenaRepo, participants)
 	arenaH.WithNotifications(notifications)
+	arenaH.WithWebhook(dispatcher)
 
 	sportsH := handlers.NewSportsHandler(sportsRepo)
+	predictionH := handlers.NewPredictionHandler(predictionRepo)
+	predictionH.WithScorecardTrigger(hub)
 
 	leaderboardRepo := repository.NewLeaderboardRepo(pool)
 	leaderboardH := handlers.NewLeaderboardHandler(leaderboardRepo)
@@ -301,6 +319,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 			"github_oauth_enabled": cfg.OAuth.GitHubClientID != "",
 			"googleClientId":       cfg.GoogleClientID,
 			"uploads_enabled":      cfg.Uploads.Enabled,
+			"federation_enabled":   cfg.Federation.Enabled,
 		})
 	})
 	mux.HandleFunc("GET /api/v1/stats", statsH.GetStats)
@@ -374,9 +393,8 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 
 	// Email verification routes
 	emailVerifyH := handlers.NewEmailVerifyHandler(participants)
-	var sharedEmailSender *emailPkg.Sender
-	if cfg.Email.ACSConnectionString != "" {
-		sharedEmailSender = emailPkg.NewSender(cfg.Email.ACSConnectionString, cfg.Email.ACSEmailDomain)
+	sharedEmailSender := emailPkg.NewConfiguredSender(cfg.Email)
+	if sharedEmailSender != nil {
 		emailVerifyH.WithEmailSender(sharedEmailSender, cfg.Email.SiteURL)
 	}
 
@@ -662,23 +680,38 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	// Fan browser pushes out of every notifications.Create call.
 	notifications.WithPushFanout(push.NewFanout(push.NewSender(cfg), pushSubs))
 
-	// ActivityPub outbound (#18): webfinger + actor + outbox, public.
-	apStore := activitypub.NewStore(pool)
-	apH := handlers.NewActivityPubHandler(apStore, pool, cfg)
-	mux.HandleFunc("GET /.well-known/webfinger", apH.Webfinger)
-	mux.HandleFunc("GET /users/{handle}", apH.Actor)
-	mux.HandleFunc("GET /users/{handle}/outbox", apH.Outbox)
+	if cfg.Federation.Enabled {
+		// ActivityPub is one in-process API component: actor discovery,
+		// signed inbox/outbox traffic, outbound follows, and post fanout all
+		// share the same keys and repositories. FEDERATION_ENABLED=false
+		// registers none of these routes and wires no external delivery hook.
+		apStore := activitypub.NewStore(pool)
+		apH := handlers.NewActivityPubHandler(apStore, pool, cfg)
+		apFollowers := activitypub.NewFollowersRepo(pool)
+		apRemoteTrust := activitypub.NewRemoteTrustRepo(pool)
+		apOutboundFollows := activitypub.NewOutboundFollowRepo(pool)
+		apActorResolver := activitypub.NewActorResolver(pool)
+		apInboxH := handlers.NewInboxHandler(apStore, apFollowers, apRemoteTrust, activitypub.NewInboundRepo(pool), apH)
+		apInboxH.WithOutboundFollows(apOutboundFollows)
+		apInboxH.WithRemoteActorResolver(apActorResolver)
+		apFollowH := handlers.NewFederationFollowHandler(
+			apOutboundFollows, apStore, apActorResolver, cfg,
+		)
 
-	// ActivityPub inbound (#19): inbox + followers collection.
-	apFollowers := activitypub.NewFollowersRepo(pool)
-	apRemoteTrust := activitypub.NewRemoteTrustRepo(pool)
-	apInboxH := handlers.NewInboxHandler(apStore, apFollowers, apRemoteTrust, apH)
-	mux.HandleFunc("POST /users/{handle}/inbox", apInboxH.Inbox)
-	mux.HandleFunc("GET /users/{handle}/followers", apInboxH.Followers)
-	mux.HandleFunc("GET /api/v1/remote-trust", apInboxH.TrustLookup)
+		mux.HandleFunc("GET /.well-known/webfinger", apH.Webfinger)
+		mux.HandleFunc("GET /users/{handle}", apH.Actor)
+		mux.HandleFunc("GET /users/{handle}/outbox", apH.Outbox)
+		mux.HandleFunc("POST /users/{handle}/inbox", apInboxH.Inbox)
+		mux.HandleFunc("GET /users/{handle}/followers", apInboxH.Followers)
+		mux.HandleFunc("GET /users/{handle}/following", apFollowH.Following)
+		mux.HandleFunc("GET /api/v1/remote-trust", apInboxH.TrustLookup)
+		mux.Handle("POST /api/v1/federation/follows", requireAnyAuth(requireWrite(http.HandlerFunc(apFollowH.Follow))))
+		mux.Handle("GET /api/v1/federation/follows", requireAnyAuth(http.HandlerFunc(apFollowH.List)))
+		mux.Handle("DELETE /api/v1/federation/follows/{id}", requireAnyAuth(requireWrite(http.HandlerFunc(apFollowH.Unfollow))))
 
-	// Federate every new post to remote followers' inboxes.
-	postH.WithAPFanout(activitypub.NewPublisher(apStore, apFollowers, cfg.Email.SiteURL))
+		// Federate every new post to remote followers' inboxes.
+		postH.WithAPFanout(activitypub.NewPublisher(apStore, apFollowers, cfg.Email.SiteURL))
+	}
 
 	// IndexNow — ping Bing/Yandex/Naver/Seznam within seconds of
 	// a new post. Fire-and-forget; no-ops if the config is empty.
@@ -938,6 +971,12 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	mux.HandleFunc("GET /api/v1/sports/standings", sportsH.Standings)
 	mux.HandleFunc("GET /api/v1/sports/takes/live", sportsH.LiveTakes)
 
+	// --- Generic prediction routes ---
+	mux.HandleFunc("GET /api/v1/posts/{id}/predictions", predictionH.ListPost)
+	mux.Handle("POST /api/v1/posts/{id}/predictions", requireAnyAuth(requireWrite(http.HandlerFunc(predictionH.UpsertPost))))
+	mux.HandleFunc("GET /api/v1/predictions/{id}", predictionH.Get)
+	mux.Handle("POST /api/v1/predictions/{id}/resolve", requireAnyAuth(requireWrite(http.HandlerFunc(predictionH.Resolve))))
+
 	// --- Mention routes ---
 	mux.HandleFunc("GET /api/v1/mentions/autocomplete", mentionH.Autocomplete)
 	mux.Handle("GET /api/v1/profiles/me/mentions", requireAnyAuth(http.HandlerFunc(mentionH.MyMentions)))
@@ -1059,14 +1098,14 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 		api.JSON(w, http.StatusOK, map[string]any{
 			"formula": "trust_score = max(0, min(100, 10 + sum(reputation_deltas)))",
 			"events": map[string]any{
-				"upvote_on_post":    "+0.5",
-				"upvote_on_comment": "+0.3",
-				"downvote_on_post":  "-0.3",
+				"upvote_on_post":      "+0.5",
+				"upvote_on_comment":   "+0.3",
+				"downvote_on_post":    "-0.3",
 				"downvote_on_comment": "-0.2",
-				"accepted_answer":   "+2.0",
-				"content_verified":  "+1.0",
-				"agent_endorsed":    "+0.5",
-				"flag_upheld":       "-5.0",
+				"accepted_answer":     "+2.0",
+				"content_verified":    "+1.0",
+				"agent_endorsed":      "+0.5",
+				"flag_upheld":         "-5.0",
 			},
 			"base_score": 10,
 			"range":      "0-100",
@@ -1124,7 +1163,10 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	})
 
 	// --- A2A (Agent-to-Agent) protocol ---
-	a2aHandler := a2agateway.NewHandler(fmt.Sprintf("http://localhost:%s", cfg.API.Port))
+	a2aHandler := a2agateway.NewHandler(
+		fmt.Sprintf("http://localhost:%s", cfg.API.Port),
+		repository.NewA2ATaskRepo(pool),
+	)
 	mux.HandleFunc("GET /.well-known/agent.json", a2aHandler.AgentCard)
 	mux.Handle("POST /a2a", middleware.APIKeyAuth(apikeys, redisCache)(http.HandlerFunc(a2aHandler.HandleTask)))
 }

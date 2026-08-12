@@ -29,6 +29,15 @@ services:
       ENVIRONMENT: production
       LOG_LEVEL: info
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      SITE_URL: ${SITE_URL}
+      FEDERATION_ENABLED: ${FEDERATION_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      ACS_CONNECTION_STRING: ${ACS_CONNECTION_STRING:-}
+      ACS_EMAIL_DOMAIN: ${ACS_EMAIL_DOMAIN:-}
     depends_on:
       - postgres
       - redis

@@ -7,6 +7,7 @@ import ErrorBoundary from '../components/ErrorBoundary'
 import OnboardingTour from '../components/OnboardingTour'
 import KeyboardShortcuts from '../components/KeyboardShortcuts'
 import SignupBanner from '../components/SignupBanner'
+import { CommunityDiscoveryProvider } from '../components/CommunityDiscoveryProvider'
 import { LFSideNav, LFRightRail, LFBottomNav, LFMobileDrawer, LFAvatar } from '../components/lf'
 import {
   IconHuman,
@@ -378,19 +379,21 @@ export default function ClientLayout({
   // hydration-mismatch. Children render server-side regardless.
   return (
     <AuthHintContext.Provider value={authHint}>
-      <div className="lf lf-app" style={{ minHeight: '100vh' }}>
-        {mounted && <OnboardingTour />}
-        {mounted && <KeyboardShortcuts />}
-        {mounted && <VerificationBanner />}
-        <LayoutGrid mounted={mounted} onSportsPages={onSportsPages}>
-          {children}
-        </LayoutGrid>
-        <SiteFooter />
-        {/* MobileWriteFab is retired in favor of LFBottomNav's Compose
-            tab. The FAB component file stays in the tree for now in
-            case we want to bring it back; it's just no longer rendered. */}
-        {mounted && <LFBottomNav />}
-      </div>
+      <CommunityDiscoveryProvider>
+        <div className="lf lf-app" style={{ minHeight: '100vh' }}>
+          {mounted && <OnboardingTour />}
+          {mounted && <KeyboardShortcuts />}
+          {mounted && <VerificationBanner />}
+          <LayoutGrid mounted={mounted} onSportsPages={onSportsPages}>
+            {children}
+          </LayoutGrid>
+          <SiteFooter />
+          {/* MobileWriteFab is retired in favor of LFBottomNav's Compose
+              tab. The FAB component file stays in the tree for now in
+              case we want to bring it back; it's just no longer rendered. */}
+          {mounted && <LFBottomNav />}
+        </div>
+      </CommunityDiscoveryProvider>
     </AuthHintContext.Provider>
   )
 }
@@ -421,7 +424,9 @@ function LayoutGrid({
       {mounted && <MobileTopBar />}
       <div className={onSportsPages ? 'lf-layout lf-layout--sports' : 'lf-layout'}>
         {mounted ? (
-          <LFSideNav />
+          <Suspense fallback={null}>
+            <LFSideNav />
+          </Suspense>
         ) : (
           <div
             style={{ width: 240, flexShrink: 0, visibility: 'hidden' }}

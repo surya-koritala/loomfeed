@@ -46,7 +46,7 @@ func createTestPost(t *testing.T, posts *repository.PostRepo, communityID, autho
 		AuthorType:  models.ParticipantHuman,
 		Title:       "Test Post",
 		Body:        "Test post body",
-		PostType: models.PostTypeText,
+		PostType:    models.PostTypeText,
 	})
 	if err != nil {
 		t.Fatalf("creating test post: %v", err)
@@ -136,5 +136,56 @@ func TestCommentHandler_ListByPost_Success(t *testing.T) {
 
 	if len(comments) < 2 {
 		t.Errorf("expected at least 2 comments, got %d", len(comments))
+	}
+}
+
+func TestCommentHandler_ListByPost_CursorIsOpaqueAndStableAcrossInsert(t *testing.T) {
+	handler, participants, communities, posts, cfg := setupCommentTest(t)
+	participant, token := registerTestUser(t, participants, cfg, "comment-cursor@example.com", "Comment Cursor")
+	community := createTestCommunity(t, communities, participant.ID, "comment-cursor-test")
+	post := createTestPost(t, posts, community.ID, participant.ID)
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/v1/posts/{id}/comments", middleware.Auth(cfg.JWT.Secret)(http.HandlerFunc(handler.Create)))
+	mux.HandleFunc("GET /api/v1/posts/{id}/comments", handler.ListByPost)
+	create := func(body string) {
+		t.Helper()
+		req := testutil.JSONRequestWithAuth(t, http.MethodPost, "/api/v1/posts/"+post.ID+"/comments", token, models.CreateCommentRequest{Body: body})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		testutil.AssertStatus(t, rec, http.StatusCreated)
+	}
+	for _, body := range []string{"Cursor one", "Cursor two", "Cursor three", "Cursor four"} {
+		create(body)
+	}
+
+	firstRec := httptest.NewRecorder()
+	mux.ServeHTTP(firstRec, httptest.NewRequest(http.MethodGet, "/api/v1/posts/"+post.ID+"/comments?sort=new&limit=2", nil))
+	testutil.AssertStatus(t, firstRec, http.StatusOK)
+	var first []models.CommentWithAuthor
+	testutil.DecodeResponse(t, firstRec, &first)
+	if len(first) != 2 {
+		t.Fatalf("expected two comments on first page, got %d", len(first))
+	}
+	cursor := firstRec.Header().Get("X-Next-Cursor")
+	_, cursorID, ok := handlers.DecodeCursor(cursor)
+	if !ok || cursorID != first[len(first)-1].ID {
+		t.Fatalf("expected opaque comment cursor for %s, got %q", first[len(first)-1].ID, cursor)
+	}
+
+	create("Concurrent newest comment")
+	secondRec := httptest.NewRecorder()
+	mux.ServeHTTP(secondRec, httptest.NewRequest(http.MethodGet, "/api/v1/posts/"+post.ID+"/comments?sort=new&limit=2&cursor="+cursor, nil))
+	testutil.AssertStatus(t, secondRec, http.StatusOK)
+	var second []models.CommentWithAuthor
+	testutil.DecodeResponse(t, secondRec, &second)
+	seen := map[string]bool{}
+	for _, comment := range first {
+		seen[comment.ID] = true
+	}
+	for _, comment := range second {
+		if seen[comment.ID] {
+			t.Fatalf("cursor page repeated comment %s after concurrent insert", comment.ID)
+		}
 	}
 }

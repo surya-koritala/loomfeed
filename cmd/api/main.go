@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/surya-koritala/loomfeed/internal/api/handlers"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
 	"github.com/surya-koritala/loomfeed/internal/api/routes"
 	"github.com/surya-koritala/loomfeed/internal/cache"
@@ -18,7 +19,7 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/digest"
 	"github.com/surya-koritala/loomfeed/internal/email"
-	"github.com/surya-koritala/loomfeed/internal/api/handlers"
+	"github.com/surya-koritala/loomfeed/internal/events"
 	"github.com/surya-koritala/loomfeed/internal/jobs"
 	"github.com/surya-koritala/loomfeed/internal/loom"
 	"github.com/surya-koritala/loomfeed/internal/metrics"
@@ -114,7 +115,8 @@ func main() {
 	// otherwise inflate request_total and skew duration percentiles.
 	mux.Handle("GET /metrics", metrics.GuardedHandler(os.Getenv("METRICS_TOKEN")))
 
-	routes.Register(mux, pool, cfg, redisCache)
+	hub := events.NewHub()
+	routes.Register(mux, pool, cfg, redisCache, hub)
 
 	// metrics.Middleware is innermost (closest to the mux) so the
 	// captured status code is what the handler wrote, not anything
@@ -208,12 +210,19 @@ func main() {
 		w.Run(ctx, 5*time.Minute)
 	}()
 
+	// Background goroutine: close expired Arena rounds and advance/complete
+	// battles. Each replica may run this; the worker uses SKIP LOCKED and
+	// durable closed_at markers so a deadline is processed once.
+	go func() {
+		jobs.NewArenaDeadlineWorker(pool).Run(ctx, 30*time.Second)
+	}()
+
 	// Background goroutine: World Cup schedule/score poller (adaptive
 	// cadence; fail-open). Runs keyless at lower upstream limits when
 	// SPORTS_FOOTBALL_DATA_KEY is unset.
 	go func() {
 		client := sports.NewClient(cfg.Sports.FootballDataKey)
-		sports.NewPoller(client, repository.NewSportsRepo(pool)).Run(ctx)
+		sports.NewPoller(client, repository.NewSportsRepo(pool)).WithScorecardTrigger(hub).Run(ctx)
 	}()
 
 	// Background goroutine: ESPN enrichment (timeline events + lineups) for
@@ -283,9 +292,8 @@ func main() {
 
 	// Background goroutine: weekly email digest (Mondays at 09:00 UTC).
 	// Sends top 5 posts of the last 7 days to every verified human.
-	if cfg.Email.ACSConnectionString != "" {
-		go func() {
-			sender := email.NewSender(cfg.Email.ACSConnectionString, cfg.Email.ACSEmailDomain)
+	if sender := email.NewConfiguredSender(cfg.Email); sender != nil {
+		go func(sender *email.Sender) {
 			for {
 				next := digest.NextMondayAt09UTC(time.Now())
 				wait := time.Until(next)
@@ -304,7 +312,9 @@ func main() {
 					slog.Info("digest: completed", "sent", sent)
 				}
 			}
-		}()
+		}(sender)
+	} else {
+		slog.Info("digest: disabled because no email provider is configured")
 	}
 
 	<-ctx.Done()

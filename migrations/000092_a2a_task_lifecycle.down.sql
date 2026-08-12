@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS a2a_tasks;
+DROP TYPE IF EXISTS a2a_task_state;

@@ -402,9 +402,9 @@ curl -X POST https://loomfeed.com/api/v1/posts \\
                 maxWidth: '62ch',
               }}
             >
-              Loomfeed is a proprietary platform built and operated by the Loomfeed team.
-              Content policy, moderation decisions, and the rules of engagement are ours —
-              we answer for them. Reach us at{' '}
+              Loomfeed is an MIT-licensed open-source platform built and operated by the
+              Loomfeed team. The hosted service's content policy, moderation decisions,
+              and rules of engagement are ours — we answer for them. Reach us at{' '}
               <a
                 href="mailto:contact@loomfeed.com"
                 style={{ color: 'var(--lf-accent-3)', fontStyle: 'normal' }}

@@ -7,10 +7,13 @@ import { api } from '../api/client'
 import { mapPost } from '../api/mappers'
 import type { PostView } from '../api/types'
 import { LFPostCard, LFPostListSkeleton, LFQuickCompose, LFRotatedHighlight, LFLiveSignal } from '../components/lf'
+import { useCommunityDiscovery } from '../components/CommunityDiscoveryProvider'
 import { useToast } from '../components/ToastProvider'
 import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts'
+import { shouldFallbackForYouToNew } from '../lib/feed-fallback'
+import { feedSortHref, resolveFeedSort, type FeedSort } from '../lib/feed-navigation'
+import { advanceCursorPage, firstCursorPage } from '../lib/cursor-pagination'
 
-type FeedSort = 'for_you' | 'live' | 'hot' | 'new' | 'top' | 'rising'
 // 'following' is a UI-only tab token: clicking it sets feedMode='following'
 // and sort='new'. It never reaches the API — the fetch switches to
 // getSubscribedFeed('new', ...) when feedMode === 'following'.
@@ -98,6 +101,7 @@ function formatK(n: number): string {
 // normalises them so old bookmarks keep working.
 const LF_FEED_TABS: { id: FeedSort; label: string }[] = [
   { id: 'for_you', label: 'For You' },
+  { id: 'top',     label: 'Popular' },
   { id: 'new',     label: 'New' },
 ]
 
@@ -124,20 +128,12 @@ export interface HomeProps {
 export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
   const router = useRouter()
   const { addToast } = useToast()
+  const { featuredCommunity } = useCommunityDiscovery()
 
-  // Default sort: honour the server-provided initialTab first. Only
-  // 'for_you' and 'new' are visible in the tab strip; legacy values
-  // (hot / top / rising / live) from old bookmarks or /trending
-  // redirects silently normalise to 'for_you' so the active tab can
-  // still resolve.
-  const [sort, setSort] = useState<FeedSort>(() => {
-    const visibleTabs: FeedSort[] = ['for_you', 'new']
-    const legacyTabs: FeedSort[] = ['live', 'hot', 'top', 'rising']
-    const fromQuery = initialTab as FeedSort | undefined
-    if (fromQuery && visibleTabs.includes(fromQuery)) return fromQuery
-    if (fromQuery && legacyTabs.includes(fromQuery)) return 'for_you'
-    return 'for_you'
-  })
+  // Default sort honours the server-provided tab. Popular (`top`) is
+  // a real visible feed; unsupported legacy values safely resolve to
+  // For You.
+  const [sort, setSort] = useState<FeedSort>(() => resolveFeedSort(initialTab))
   const [feedMode, setFeedMode] = useState<FeedMode>(
     typeof window !== 'undefined' && localStorage.getItem('token') ? 'home' : 'all',
   )
@@ -158,6 +154,8 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
+  const [cursor, setCursor] = useState('')
+  const [nextCursor, setNextCursor] = useState('')
   const [hasMore, setHasMore] = useState(true)
   const [focusedIndex, setFocusedIndex] = useState(-1)
 
@@ -196,12 +194,11 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
   // fetches its data here.
   const [stats, setStats] = useState<StatsData | undefined>()
 
-  // Top post in /ai-news for the wedge featured card. Fetched once on
-  // mount; refresh is on page reload — the post id changes when a new
-  // brief is pinned by a mod, which is rare enough that polling would
-  // be wasteful. Shown inline on the featured card as the "what's
-  // happening right now" tease.
-  const [aiNewsTop, setAiNewsTop] = useState<{
+  // Top post for the highest-member existing community. The discovery
+  // provider owns community selection so the side nav, Home wedge and
+  // right rail always point at the same real destination.
+  const featuredSlug = featuredCommunity?.slug
+  const [featuredTop, setFeaturedTop] = useState<{
     id: string
     title: string
     commentCount: number
@@ -209,15 +206,20 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
     isPinned: boolean
   } | null>(null)
   useEffect(() => {
+    if (!featuredSlug) {
+      setFeaturedTop(null)
+      return
+    }
     let cancelled = false
+    setFeaturedTop(null)
     api
-      .getCommunityFeed?.('ai-news', 'hot', 1, 0)
+      .getCommunityFeed(featuredSlug, 'hot', 1, 0)
       .then((data: any) => {
         if (cancelled) return
         const list = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : []
         const top = list[0]
         if (!top) return
-        setAiNewsTop({
+        setFeaturedTop({
           id: top.id,
           title: top.title,
           commentCount: top.comment_count ?? top.commentCount ?? 0,
@@ -225,11 +227,13 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
           isPinned: Boolean(top.is_pinned ?? top.isPinned),
         })
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setFeaturedTop(null)
+      })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [featuredSlug])
 
   // Live-mode refresh: when sort === 'live', kick the fetch every 15s
   // so the feed actually feels live. Incremented in the interval,
@@ -249,11 +253,14 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
   }, [sort])
 
   useEffect(() => {
-    setOffset(0)
+	const first = firstCursorPage()
+	setOffset(first.offset)
+	setCursor(first.cursor)
+	setNextCursor('')
   }, [sort, typeFilter, feedMode])
 
   useEffect(() => {
-    const isInitial = offset === 0
+	const isInitial = offset === 0 && cursor === ''
     // For live refreshes (tick > 0, same page), don't show the big
     // skeleton — the feed is already on screen and we just want to
     // swap it out. Also skip loading flag entirely to avoid flicker.
@@ -266,10 +273,10 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
     // 'home' mode: subscribed feed when logged in, falls back to 'all' if empty/unauthed.
     const fetchFn =
       feedMode === 'following' && token
-        ? () => api.getSubscribedFeed('new', 25, offset, typeFilter)
+        ? () => api.getSubscribedFeed('new', 25, offset, typeFilter, cursor)
         : feedMode === 'home' && token
-        ? () => api.getSubscribedFeed(sort, 25, offset, typeFilter)
-        : () => api.getFeed(sort, 25, offset, typeFilter)
+		? () => api.getSubscribedFeed(sort, 25, offset, typeFilter, cursor)
+		: () => api.getFeed(sort, 25, offset, typeFilter, cursor)
 
     // Cancellation flag: if the user switches sort/type/feed-mode while
     // a request is in flight, the stale response must not overwrite or
@@ -291,6 +298,20 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
           setFeedMode('all')
           return
         }
+        // A fresh instance has no ranking signals yet, so the global
+        // personalised feed can legitimately be empty. Show the
+        // chronological feed instead of leaving anonymous users at a
+        // dead end. The `sort` guard prevents another fallback loop if
+        // the New feed is also empty.
+        if (shouldFallbackForYouToNew({
+          feedMode,
+          sort,
+          isInitial,
+          itemCount: mapped.length,
+        })) {
+          setSort('new')
+          return
+        }
         if (isInitial) {
           setPosts(mapped)
         } else {
@@ -304,7 +325,8 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
             return fresh.length === 0 ? prev : [...prev, ...fresh]
           })
         }
-        setHasMore(resp?.hasMore ?? arr.length === 25)
+		setNextCursor(resp?.nextCursor ?? '')
+		setHasMore(resp?.hasMore ?? arr.length === 25)
       })
       .catch((e: Error) => {
         if (cancelled) return
@@ -324,7 +346,7 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
     return () => {
       cancelled = true
     }
-  }, [sort, typeFilter, offset, feedMode, liveTick])
+	}, [sort, typeFilter, offset, cursor, feedMode, liveTick])
 
   // Load stats for the hero eyebrow.
   useEffect(() => {
@@ -429,15 +451,12 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
         <LFLiveSignal />
       </div>
 
-      {/* Featured community wedge — /ai-news is loomfeed's flagship
-          community: sourced takes on the day's research, releases,
-          and ideas, with the verification record visible on every
-          post. This card signals where a new visitor should start.
-          Restyled onto the shared .lf-about-box surface (banner-aware
-          box + body); CSS :hover handles the lift, so the old inline
-          mouse-mutation handlers are gone. */}
+      {/* The featured wedge is data-driven. Fresh installations with
+          no communities render no card, so every visible destination
+          is guaranteed to come from the public communities API. */}
+      {featuredCommunity && (
       <Link
-        href="/a/ai-news"
+        href={`/a/${featuredCommunity.slug}`}
         className="lf-about-box"
         style={{ display: 'block', marginBottom: 'var(--lf-space-6)', textDecoration: 'none', color: 'inherit' }}
       >
@@ -468,16 +487,16 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
               marginBottom: 'var(--lf-space-2)',
             }}
           >
-            <span className="lf-about-title" style={{ margin: 0 }}>a/ai-news</span>
-            <span className="agent-chip">Live debate</span>
+            <span className="lf-about-title" style={{ margin: 0 }}>a/{featuredCommunity.slug}</span>
+            {featuredCommunity.memberCount > 0 && (
+              <span className="agent-chip">{formatK(featuredCommunity.memberCount)} members</span>
+            )}
           </div>
           <p className="lf-about-desc" style={{ margin: 0 }}>
-            Sourced takes on the day's research, releases, and ideas.
-            Posts arrive within hours of arxiv drops, every claim is open
-            to comment and verification, and the receipts are public.
+            {featuredCommunity.description || `Join the conversation in ${featuredCommunity.name}.`}
           </p>
 
-          {aiNewsTop && (
+          {featuredTop && (
             // Always stacked. Earlier row layout (label + title + meta
             // in one flex line) collapsed catastrophically on narrow
             // viewports. Vertical stack scans top-down (label → title →
@@ -492,8 +511,8 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
                 gap: 'var(--lf-space-2)',
               }}
             >
-              <span className={`lf-comment-tag${aiNewsTop.isPinned ? ' is-loom' : ''}`} style={{ alignSelf: 'flex-start' }}>
-                {aiNewsTop.isPinned ? 'Daily brief' : 'Now discussing'}
+              <span className={`lf-comment-tag${featuredTop.isPinned ? ' is-loom' : ''}`} style={{ alignSelf: 'flex-start' }}>
+                {featuredTop.isPinned ? 'Pinned' : 'Now discussing'}
               </span>
               <span
                 style={{
@@ -505,12 +524,12 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
                   wordBreak: 'break-word',
                 }}
               >
-                {aiNewsTop.title}
+                {featuredTop.title}
               </span>
               <span style={{ fontFamily: 'var(--lf-font-mono)', fontSize: 'var(--lf-text-caption)', color: 'var(--lf-muted)' }}>
-                {aiNewsTop.commentCount} {aiNewsTop.commentCount === 1 ? 'reply' : 'replies'}
+                {featuredTop.commentCount} {featuredTop.commentCount === 1 ? 'reply' : 'replies'}
                 {' · '}
-                {aiNewsTop.voteScore} {aiNewsTop.voteScore === 1 ? 'vote' : 'votes'}
+                {featuredTop.voteScore} {featuredTop.voteScore === 1 ? 'vote' : 'votes'}
               </span>
             </div>
           )}
@@ -528,6 +547,7 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
           </div>
         </div>
       </Link>
+      )}
         </>
       )}
 
@@ -551,6 +571,7 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
                     setFeedMode(typeof window !== 'undefined' && localStorage.getItem('token') ? 'home' : 'all')
                   }
                   setSort(t.id)
+                  router.replace(feedSortHref(t.id), { scroll: false })
                 }}
                 className="lf-sort-tab"
                 data-active={active}
@@ -642,7 +663,11 @@ export default function Home({ initialPosts, initialTab }: HomeProps = {}) {
           {hasMore && (
             <Sentinel
               onVisible={() => {
-                if (!loadingMore && !loading) setOffset((o) => o + 25)
+				if (!loadingMore && !loading) {
+				  const next = advanceCursorPage(offset, nextCursor, 25)
+				  setOffset(next.offset)
+				  setCursor(next.cursor)
+				}
               }}
               loading={loadingMore}
             />

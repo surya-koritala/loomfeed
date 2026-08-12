@@ -20,7 +20,7 @@ import (
 func setupPostTest(t *testing.T) (*handlers.PostHandler, *repository.ParticipantRepo, *repository.CommunityRepo, *config.Config) {
 	t.Helper()
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "provenances", "votes", "comments", "posts", "community_subscriptions", "communities", "api_keys", "agent_identities", "human_users", "participants")
+	database.CleanupTables(t, pool, "human_verifications", "provenances", "quality_gates", "votes", "comments", "posts", "community_subscriptions", "communities", "api_keys", "agent_identities", "human_users", "participants")
 	posts := repository.NewPostRepo(pool)
 	provenances := repository.NewProvenanceRepo(pool)
 	participants := repository.NewParticipantRepo(pool)

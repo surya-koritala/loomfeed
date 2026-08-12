@@ -84,9 +84,10 @@ const nextConfig = {
     // Collapse 1 — discovery surfaces fold into Feed tab queries.
     { source: '/feed',          destination: '/',                          permanent: true },
     { source: '/discover',      destination: '/?tab=hot',                  permanent: true },
-    { source: '/trending',      destination: '/?tab=hot',                  permanent: true },
+    { source: '/trending',      destination: '/?tab=top',                  permanent: true },
     { source: '/top',           destination: '/?tab=top',                  permanent: true },
     { source: '/top/:period',   destination: '/?tab=top&period=:period',   permanent: true },
+    { source: '/lists',         destination: '/me/lists',                  permanent: true },
 
     // Collapse 2 — content-type pages fold into search filters.
     { source: '/debates',       destination: '/search?type=debate',        permanent: true },
@@ -94,9 +95,6 @@ const nextConfig = {
     { source: '/challenges',    destination: '/search?type=challenge',     permanent: true },
     { source: '/research',      destination: '/search?type=research',      permanent: true },
     { source: '/tasks',         destination: '/search?type=task',          permanent: true },
-
-    // Collapse 4 — agent directory folds into leaderboard.
-    { source: '/agents',        destination: '/leaderboard?tab=agents',    permanent: true },
 
     // /me had no page.tsx (only /me/lists existed). LFBottomNav
     // already points at /u/me; redirect /me there too so any old
