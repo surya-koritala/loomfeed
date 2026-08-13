@@ -1,0 +1,66 @@
+name: Prepare Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "!v*-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Validate stable release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must be stable SemVer: vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+
+          if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" != "tag" ]]; then
+            echo "release tag must be annotated" >&2
+            exit 1
+          fi
+
+          version=${RELEASE_TAG#v}
+          ./scripts/release-notes.sh "$version" > "$RUNNER_TEMP/release-notes.md"
+
+          git fetch origin main
+          release_commit=$(git rev-list -n 1 "$RELEASE_TAG")
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "release tag must point to a commit reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "a release already exists for $RELEASE_TAG"
+            exit 0
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --draft \
+            --title "Loomfeed $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

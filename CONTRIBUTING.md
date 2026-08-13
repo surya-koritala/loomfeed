@@ -38,6 +38,10 @@ Node.js 22+, PostgreSQL 16 (pgvector image), and Redis 7.
   to auth storage, telemetry, ads, processors, or third-party embeds
 - Frontend follows [docs/FRONTEND_CONVENTIONS.md](docs/FRONTEND_CONVENTIONS.md)
 
+Maintainers preparing a version should follow the draft-first, immutable
+[release procedure](docs/RELEASING.md). SDK and web package versions remain
+independent from repository release tags.
+
 ## Reporting bugs and requesting features
 
 Use the issue templates. For anything security-sensitive, do **not**
