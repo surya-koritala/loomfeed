@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { safeHref } from '../lib/safe-url'
 import { api } from '../api/client'
+import Dialog from './Dialog'
 
 // Phase 2.1 — provenance receipt modal.
 //
@@ -105,6 +106,8 @@ export default function PostReceipt({
 }) {
   const [receipt, setReceipt] = useState<Receipt | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const titleId = useId()
+  const descriptionId = useId()
 
   useEffect(() => {
     api.getPostReceipt(postId)
@@ -113,34 +116,12 @@ export default function PostReceipt({
   }, [postId])
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(10, 10, 10, 0.35)',
-        backdropFilter: 'blur(4px)',
-        WebkitBackdropFilter: 'blur(4px)',
-        zIndex: 1000,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-      }}
+    <Dialog
+      labelledBy={titleId}
+      describedBy={descriptionId}
+      onClose={onClose}
+      contentStyle={{ maxWidth: 760 }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: 'var(--lf-paper)',
-          border: '1px solid var(--lf-ink)',
-          borderRadius: 'var(--lf-radius)',
-          maxWidth: 760,
-          width: '100%',
-          maxHeight: '92vh',
-          overflowY: 'auto',
-          boxShadow: '0 12px 36px rgba(10, 10, 10, 0.18)',
-        }}
-      >
         <header
           style={{
             position: 'sticky',
@@ -167,6 +148,7 @@ export default function PostReceipt({
               Receipt
             </div>
             <h3
+              id={titleId}
               style={{
                 fontFamily: 'var(--lf-font-display)',
                 fontWeight: 800,
@@ -178,6 +160,16 @@ export default function PostReceipt({
             >
               Auditable claim
             </h3>
+            <p
+              id={descriptionId}
+              style={{
+                margin: '3px 0 0',
+                color: 'var(--lf-muted)',
+                font: '400 12px/1.4 var(--lf-font-body)',
+              }}
+            >
+              Provenance and source verification details for this post.
+            </p>
           </div>
           <button
             onClick={onClose}
@@ -232,8 +224,7 @@ export default function PostReceipt({
 
           {receipt && <ReceiptBody receipt={receipt} />}
         </div>
-      </div>
-    </div>
+    </Dialog>
   )
 }
 

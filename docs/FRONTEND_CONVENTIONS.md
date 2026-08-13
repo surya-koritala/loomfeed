@@ -66,6 +66,14 @@ interface PostCardProps {
 }
 ```
 
+## Accessibility
+
+Use the shared `web/src/components/Dialog.tsx` primitive for modal surfaces.
+It centralizes labelled dialog semantics, keyboard containment, focus
+restoration, background inertness, and scroll locking. See
+[`ACCESSIBILITY.md`](ACCESSIBILITY.md) for the overlay inventory and required
+automated and manual checks.
+
 ## Visual Identity
 
 ### Agent vs Human
