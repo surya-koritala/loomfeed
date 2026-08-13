@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/surya-koritala/loomfeed/internal/api/handlers"
@@ -14,6 +15,7 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
 	"github.com/surya-koritala/loomfeed/internal/testutil"
+	"github.com/surya-koritala/loomfeed/internal/webhook"
 )
 
 func TestPostHandlerCreateEnforcesQualityGateThresholds(t *testing.T) {
@@ -113,6 +115,7 @@ func TestHumanVerificationPublishesGateHeldAgentPost(t *testing.T) {
 	handler.WithQualityGates(gates)
 
 	human, humanToken := registerTestUser(t, participants, cfg, "quality-verifier@example.com", "Human Verifier")
+	_, secondHumanToken := registerTestUser(t, participants, cfg, "quality-verifier-two@example.com", "Second Human Verifier")
 	community := createTestCommunity(t, communities, human.ID, "quality-gate-verification")
 	agent, err := participants.CreateAgent(context.Background(), &models.AgentIdentity{
 		Participant: models.Participant{DisplayName: "Held Agent"},
@@ -146,12 +149,30 @@ func TestHumanVerificationPublishesGateHeldAgentPost(t *testing.T) {
 	}
 
 	verification := handlers.NewVerificationHandler(repository.NewVerificationRepo(pool), posts, repository.NewReputationRepo(pool))
+	webhooks := &sourceEventRecorder{}
+	verification.WithWebhook(webhooks)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/v1/posts/{id}/verify", middleware.Auth(cfg.JWT.Secret)(http.HandlerFunc(verification.Verify)))
-	verifyReq := testutil.JSONRequestWithAuth(t, http.MethodPost, "/api/v1/posts/"+created.ID+"/verify", humanToken, nil)
-	verifyRec := httptest.NewRecorder()
-	mux.ServeHTTP(verifyRec, verifyReq)
-	testutil.AssertStatus(t, verifyRec, http.StatusOK)
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, 2)
+	var wg sync.WaitGroup
+	for _, verifierToken := range []string{humanToken, secondHumanToken} {
+		verifierToken := verifierToken
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			result := httptest.NewRecorder()
+			mux.ServeHTTP(result, testutil.JSONRequestWithAuth(t, http.MethodPost, "/api/v1/posts/"+created.ID+"/verify", verifierToken, nil))
+			results <- result
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for result := range results {
+		testutil.AssertStatus(t, result, http.StatusOK)
+	}
 
 	published, err := posts.GetByID(context.Background(), created.ID)
 	if err != nil {
@@ -160,13 +181,27 @@ func TestHumanVerificationPublishesGateHeldAgentPost(t *testing.T) {
 	if published.Quarantined {
 		t.Fatal("first human verification should release the post to public feeds")
 	}
+	event := webhooks.only(t)
+	if event.typeName != webhook.EventPostCreated || event.payload["post_id"] != created.ID || event.payload["title"] != created.Title {
+		t.Fatalf("verified publication event=%#v", event)
+	}
 
-	unverifyReq := testutil.JSONRequestWithAuth(t, http.MethodDelete, "/api/v1/posts/"+created.ID+"/verify", humanToken, nil)
-	unverifyRec := httptest.NewRecorder()
+	// Concurrent and duplicate verifications are idempotent at the publication
+	// boundary and must not republish the event.
+	again := httptest.NewRecorder()
+	mux.ServeHTTP(again, testutil.JSONRequestWithAuth(t, http.MethodPost, "/api/v1/posts/"+created.ID+"/verify", humanToken, nil))
+	testutil.AssertStatus(t, again, http.StatusOK)
+	if got := webhooks.count(); got != 1 {
+		t.Fatalf("duplicate verification emitted %d publication events, want one", got)
+	}
+
 	unverifyMux := http.NewServeMux()
 	unverifyMux.Handle("DELETE /api/v1/posts/{id}/verify", middleware.Auth(cfg.JWT.Secret)(http.HandlerFunc(verification.Unverify)))
-	unverifyMux.ServeHTTP(unverifyRec, unverifyReq)
-	testutil.AssertStatus(t, unverifyRec, http.StatusOK)
+	for _, verifierToken := range []string{humanToken, secondHumanToken} {
+		unverifyRec := httptest.NewRecorder()
+		unverifyMux.ServeHTTP(unverifyRec, testutil.JSONRequestWithAuth(t, http.MethodDelete, "/api/v1/posts/"+created.ID+"/verify", verifierToken, nil))
+		testutil.AssertStatus(t, unverifyRec, http.StatusOK)
+	}
 	heldAgain, err := posts.GetByID(context.Background(), created.ID)
 	if err != nil {
 		t.Fatalf("get unverified post: %v", err)

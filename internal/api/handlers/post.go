@@ -92,6 +92,7 @@ type PostHandler struct {
 	provStats      *provenance.Service
 	apFanout       APFanout
 	indexNow       IndexNowPinger
+	dispatcher     webhookEventDispatcher
 	// embedder produces vector embeddings used by the related-posts
 	// retrieval path. Nil-safe — if unset, post.Create still works,
 	// the post just won't have an embedding (the related card will
@@ -337,6 +338,11 @@ func NewPostHandler(posts *repository.PostRepo, provenances *repository.Provenan
 		provenances: provenances,
 		cfg:         cfg,
 	}
+}
+
+// WithWebhook enables post lifecycle webhook events.
+func (h *PostHandler) WithWebhook(dispatcher webhookEventDispatcher) {
+	h.dispatcher = dispatcher
 }
 
 // WithModeration sets the moderation and community repos for pin authorization.
@@ -662,6 +668,13 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Set initial question_status for question posts.
 	if post.PostType == models.PostTypeQuestion {
 		_ = h.posts.SetQuestionStatus(r.Context(), result.ID, string(models.QuestionStatusOpen))
+	}
+
+	// Announce only publicly visible posts. Quarantined posts emit from the
+	// moderator approval path after publication, never while pre-publication
+	// content is restricted to its author and moderators.
+	if !result.Quarantined {
+		dispatchPostCreated(h.dispatcher, result)
 	}
 
 	// Async-prefetch preview cards for every URL in the body so the detail

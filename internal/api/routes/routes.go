@@ -37,6 +37,7 @@ import (
 
 type registerOptions struct {
 	disableBackgroundWorkers bool
+	webhookClient            *http.Client
 }
 
 func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts ...any) {
@@ -44,6 +45,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	var redisCache *cache.RedisCache
 	var hub *events.Hub
 	disableBackgroundWorkers := false
+	var webhookClient *http.Client
 	for _, o := range opts {
 		switch v := o.(type) {
 		case string:
@@ -56,6 +58,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 			hub = v
 		case registerOptions:
 			disableBackgroundWorkers = v.disableBackgroundWorkers
+			webhookClient = v.webhookClient
 		}
 	}
 	if hub == nil {
@@ -97,6 +100,9 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 
 	// Event hub and webhook dispatcher
 	dispatcher := webhook.NewDispatcher(webhooks)
+	if webhookClient != nil {
+		dispatcher = webhook.NewDispatcherWithClient(webhooks, webhookClient)
+	}
 
 	// newLimiter picks the rate-limit backend at startup. With Redis
 	// configured we use a cross-replica counter so a limit of N/min is
@@ -150,6 +156,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	postH.WithBlocks(blocks)
 	postH.WithAccount(accountRepo)
 	postH.WithFollows(follows)
+	postH.WithWebhook(dispatcher)
 	// Loom v2 — wire the embeddings client so post.Create kicks off
 	// an async embedding pass for each new post. Same Azure OpenAI
 	// endpoint as the chat completions deployment; separate
@@ -217,6 +224,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	editH.WithModeration(moderation)
 	editH.WithScorecardTrigger(hub)
 	reactionH := handlers.NewReactionHandler(reactions, posts, comments, reputation, cfg)
+	reactionH.WithWebhook(dispatcher)
 	statsH := handlers.NewStatsHandler(pool)
 	statsH.WithCache(redisCache)
 	activityH := handlers.NewActivityHandler(pool)
@@ -260,6 +268,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	modH.WithQualityGates(qualityGates)
 	modActionH := handlers.NewModActionHandler(modActions, moderation, communities, reports)
 	modActionH.WithPostsAndAccount(posts, accountRepo)
+	modActionH.WithWebhook(dispatcher)
 	webhookH := handlers.NewWebhookHandler(webhooks, dispatcher)
 	agentDirH := handlers.NewAgentDirectoryHandler(pool)
 	peopleH := handlers.NewPeopleHandler(repository.NewPeopleRepo(pool), follows, blocks)
@@ -315,6 +324,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	// Verification repo + handler (Human Seal of Approval)
 	verificationRepo := repository.NewVerificationRepo(pool)
 	verificationH := handlers.NewVerificationHandler(verificationRepo, posts, reputation)
+	verificationH.WithWebhook(dispatcher)
 
 	// Auth middleware
 	// requireAuth: JWT only (for human-only endpoints like agent management)
@@ -894,11 +904,11 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	mux.Handle("GET /api/v1/people/suggested", requireAuth(http.HandlerFunc(peopleH.Suggested)))
 
 	// --- Webhook routes (agents + humans) ---
-	mux.Handle("POST /api/v1/webhooks", requireAnyAuth(http.HandlerFunc(webhookH.Create)))
+	mux.Handle("POST /api/v1/webhooks", requireAnyAuth(requireWrite(http.HandlerFunc(webhookH.Create))))
 	mux.Handle("GET /api/v1/webhooks", requireAnyAuth(http.HandlerFunc(webhookH.List)))
-	mux.Handle("DELETE /api/v1/webhooks/{id}", requireAnyAuth(http.HandlerFunc(webhookH.Delete)))
+	mux.Handle("DELETE /api/v1/webhooks/{id}", requireAnyAuth(requireWrite(http.HandlerFunc(webhookH.Delete))))
 	mux.Handle("GET /api/v1/webhooks/{id}/deliveries", requireAnyAuth(http.HandlerFunc(webhookH.ListDeliveries)))
-	mux.Handle("POST /api/v1/webhooks/{id}/test", requireAnyAuth(http.HandlerFunc(webhookH.Test)))
+	mux.Handle("POST /api/v1/webhooks/{id}/test", requireAnyAuth(requireWrite(http.HandlerFunc(webhookH.Test))))
 
 	// --- Agent subscription routes (agents + humans) ---
 	mux.Handle("POST /api/v1/agent-subscriptions", requireAnyAuth(requireWrite(http.HandlerFunc(agentSubH.Create))))

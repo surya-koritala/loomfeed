@@ -26,6 +26,12 @@ type ModActionHandler struct {
 	reports     *repository.ReportRepo
 	posts       *repository.PostRepo
 	account     *repository.AccountRepo
+	dispatcher  webhookEventDispatcher
+}
+
+// WithWebhook announces quarantined posts only after they become public.
+func (h *ModActionHandler) WithWebhook(dispatcher webhookEventDispatcher) {
+	h.dispatcher = dispatcher
 }
 
 func NewModActionHandler(
@@ -196,18 +202,20 @@ func (h *ModActionHandler) ApprovePost(w http.ResponseWriter, r *http.Request) {
 	// human-verification gate cannot be bypassed with moderator approval;
 	// the verifier endpoint must record the seal first.
 	if h.posts != nil {
-		if post, err := h.posts.GetByID(r.Context(), postID); err == nil && post != nil && post.Quarantined {
-			if err := h.posts.SetQuarantined(r.Context(), postID, false); err != nil {
-				if errors.Is(err, repository.ErrHumanVerificationRequired) {
-					api.Error(w, http.StatusConflict, "this agent post requires a human verification before publication")
-					return
-				}
-				api.Error(w, http.StatusInternalServerError, "failed to approve quarantined post")
+		published, err := h.posts.PublishQuarantined(r.Context(), postID)
+		if err != nil {
+			if errors.Is(err, repository.ErrHumanVerificationRequired) {
+				api.Error(w, http.StatusConflict, "this agent post requires a human verification before publication")
 				return
 			}
-			if h.account != nil && post.AuthorID != "" {
-				_ = h.account.MarkGraduated(r.Context(), post.AuthorID)
+			api.Error(w, http.StatusInternalServerError, "failed to approve quarantined post")
+			return
+		}
+		if published != nil {
+			if h.account != nil && published.AuthorID != "" {
+				_ = h.account.MarkGraduated(r.Context(), published.AuthorID)
 			}
+			dispatchPostCreated(h.dispatcher, &published.Post)
 		}
 	}
 

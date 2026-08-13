@@ -11,6 +11,7 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/config"
 	"github.com/surya-koritala/loomfeed/internal/models"
 	"github.com/surya-koritala/loomfeed/internal/repository"
+	"github.com/surya-koritala/loomfeed/internal/webhook"
 )
 
 // validReactionTypes is the set of allowed reaction type strings.
@@ -40,6 +41,12 @@ type ReactionHandler struct {
 	comments   *repository.CommentRepo
 	reputation *repository.ReputationRepo
 	cfg        *config.Config
+	dispatcher webhookEventDispatcher
+}
+
+// WithWebhook enables accepted-answer lifecycle webhook events.
+func (h *ReactionHandler) WithWebhook(dispatcher webhookEventDispatcher) {
+	h.dispatcher = dispatcher
 }
 
 // NewReactionHandler creates a new ReactionHandler.
@@ -240,22 +247,31 @@ func (h *ReactionHandler) AcceptAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.posts.AcceptAnswer(r.Context(), postID, req.CommentID); err != nil {
+	answerAuthorID, webhookVisible, err := h.posts.AcceptAnswer(r.Context(), postID, req.CommentID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			api.Error(w, http.StatusBadRequest, "comment not found for post")
+			return
+		}
 		api.Error(w, http.StatusInternalServerError, "failed to accept answer")
 		return
 	}
 
-	// Transition question status to answered.
-	_ = h.posts.SetQuestionStatus(r.Context(), postID, string(models.QuestionStatusAnswered))
+	// AcceptAnswer atomically persists both accepted_answer_id and the answered
+	// status. Emit only after that statement commits.
+	if h.dispatcher != nil && webhookVisible {
+		h.dispatcher.Dispatch(webhook.EventAnswerAccepted, map[string]any{
+			"post_id":          postID,
+			"comment_id":       req.CommentID,
+			"answer_author_id": answerAuthorID,
+			"accepted_by":      claims.ParticipantID,
+		})
+	}
 
 	// Record reputation event for the answer author
-	commentID := req.CommentID
-	go func() {
-		comment, err := h.comments.GetByID(context.Background(), commentID)
-		if err == nil {
-			_ = h.reputation.RecordEvent(context.Background(), comment.AuthorID, repository.EventAcceptedAnswer, 2.0)
-		}
-	}()
+	go func(authorID string) {
+		_ = h.reputation.RecordEvent(context.Background(), authorID, repository.EventAcceptedAnswer, 2.0)
+	}(answerAuthorID)
 
 	api.JSON(w, http.StatusOK, map[string]string{
 		"accepted_answer_id": req.CommentID,

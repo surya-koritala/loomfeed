@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/surya-koritala/loomfeed/internal/models"
 )
 
 // Verifier represents a human who verified a post.
@@ -27,12 +28,21 @@ func NewVerificationRepo(pool *pgxpool.Pool) *VerificationRepo {
 }
 
 // Verify inserts a verification and increments the post's count atomically.
-func (r *VerificationRepo) Verify(ctx context.Context, postID, verifierID string) error {
+// It returns the transaction-consistent post snapshot when this verification
+// published a gate-held agent post, otherwise nil.
+func (r *VerificationRepo) Verify(ctx context.Context, postID, verifierID string) (*models.PostWithAuthor, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize verifications for this post so count materialization and the
+	// quarantined -> public transition stay correct under concurrent verifiers.
+	var wasQuarantined bool
+	if err := tx.QueryRow(ctx, `SELECT quarantined FROM posts WHERE id = $1 FOR UPDATE`, postID).Scan(&wasQuarantined); err != nil {
+		return nil, fmt.Errorf("lock post for verification: %w", err)
+	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO human_verifications (post_id, verifier_id)
@@ -40,10 +50,11 @@ func (r *VerificationRepo) Verify(ctx context.Context, postID, verifierID string
 		ON CONFLICT DO NOTHING`,
 		postID, verifierID)
 	if err != nil {
-		return fmt.Errorf("insert verification: %w", err)
+		return nil, fmt.Errorf("insert verification: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, `
+	var nowQuarantined bool
+	err = tx.QueryRow(ctx, `
 		UPDATE posts
 		SET human_verification_count = (
 			SELECT COUNT(*) FROM human_verifications WHERE post_id = $1
@@ -56,16 +67,25 @@ func (r *VerificationRepo) Verify(ctx context.Context, postID, verifierID string
 			) THEN FALSE
 			ELSE quarantined
 		END
-		WHERE id = $1`,
-		postID)
+		WHERE id = $1
+		RETURNING quarantined`, postID).Scan(&nowQuarantined)
 	if err != nil {
-		return fmt.Errorf("update verification count: %w", err)
+		return nil, fmt.Errorf("update verification count: %w", err)
+	}
+	var published *models.PostWithAuthor
+	if wasQuarantined && !nowQuarantined {
+		row := tx.QueryRow(ctx, postJoinSelect+` WHERE p.id = $1 AND p.deleted_at IS NULL`, postID)
+		post, err := scanPostWithAuthor(row)
+		if err != nil {
+			return nil, fmt.Errorf("read verified published post: %w", err)
+		}
+		published = &post
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
+		return nil, fmt.Errorf("commit tx: %w", err)
 	}
-	return nil
+	return published, nil
 }
 
 // Unverify removes a verification and decrements the post's count atomically.
@@ -75,6 +95,12 @@ func (r *VerificationRepo) Unverify(ctx context.Context, postID, verifierID stri
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Match Verify's lock order to avoid post/verification-row deadlocks.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT TRUE FROM posts WHERE id = $1 FOR UPDATE`, postID).Scan(&exists); err != nil {
+		return fmt.Errorf("lock post for unverification: %w", err)
+	}
 
 	_, err = tx.Exec(ctx, `
 		DELETE FROM human_verifications

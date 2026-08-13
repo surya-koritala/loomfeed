@@ -25,6 +25,7 @@ type Webhook struct {
 // WebhookDelivery represents a single webhook delivery attempt.
 type WebhookDelivery struct {
 	ID           string    `json:"id"`
+	EventID      string    `json:"event_id"`
 	WebhookID    string    `json:"webhook_id"`
 	EventType    string    `json:"event_type"`
 	Payload      any       `json:"payload"`
@@ -119,15 +120,15 @@ func (r *WebhookRepo) Delete(ctx context.Context, webhookID, participantID strin
 }
 
 // RecordDelivery logs a webhook delivery attempt.
-func (r *WebhookRepo) RecordDelivery(ctx context.Context, webhookID, eventType string, payload map[string]any, statusCode int, responseBody string, success bool) error {
+func (r *WebhookRepo) RecordDelivery(ctx context.Context, eventID, webhookID, eventType string, payload map[string]any, statusCode int, responseBody string, success bool) error {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 	_, err = r.pool.Exec(ctx,
-		`INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, success)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-		webhookID, eventType, payloadBytes, statusCode, responseBody, success)
+		`INSERT INTO webhook_deliveries (event_id, webhook_id, event_type, payload, status_code, response_body, success)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		eventID, webhookID, eventType, payloadBytes, statusCode, responseBody, success)
 	if err != nil {
 		return fmt.Errorf("record delivery: %w", err)
 	}
@@ -138,31 +139,35 @@ func (r *WebhookRepo) RecordDelivery(ctx context.Context, webhookID, eventType s
 	return nil
 }
 
-// IncrementFailure increments the failure count for a webhook.
-func (r *WebhookRepo) IncrementFailure(ctx context.Context, webhookID string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = $1`, webhookID)
-	return err
+// RecordFailure atomically increments the consecutive-failure count and
+// deactivates the webhook at the threshold. Keeping both changes in one row
+// update prevents a concurrent successful delivery from being overwritten by
+// a stale threshold decision.
+func (r *WebhookRepo) RecordFailure(ctx context.Context, webhookID string) (int, bool, error) {
+	var count int
+	var active bool
+	err := r.pool.QueryRow(ctx,
+		`UPDATE webhooks
+		 SET failure_count = failure_count + 1,
+		     is_active = is_active AND failure_count + 1 < 10
+		 WHERE id = $1
+		 RETURNING failure_count, is_active`,
+		webhookID).Scan(&count, &active)
+	return count, active, err
 }
 
-// ResetFailure resets the failure count for a webhook to zero.
+// ResetFailure records a successful in-flight delivery. It clears the failure
+// streak and restores a webhook that a concurrent failure may have disabled.
 func (r *WebhookRepo) ResetFailure(ctx context.Context, webhookID string) error {
 	_, err := r.pool.Exec(ctx,
-		`UPDATE webhooks SET failure_count = 0 WHERE id = $1`, webhookID)
-	return err
-}
-
-// Deactivate sets a webhook as inactive.
-func (r *WebhookRepo) Deactivate(ctx context.Context, webhookID string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE webhooks SET is_active = FALSE WHERE id = $1`, webhookID)
+		`UPDATE webhooks SET failure_count = 0, is_active = TRUE WHERE id = $1`, webhookID)
 	return err
 }
 
 // ListDeliveries returns recent delivery logs for a webhook.
 func (r *WebhookRepo) ListDeliveries(ctx context.Context, webhookID string, limit, offset int) ([]WebhookDelivery, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, webhook_id, event_type, payload, COALESCE(status_code, 0), COALESCE(response_body, ''), delivered_at, success
+		`SELECT id, event_id, webhook_id, event_type, payload, COALESCE(status_code, 0), COALESCE(response_body, ''), delivered_at, success
          FROM webhook_deliveries
          WHERE webhook_id = $1
          ORDER BY delivered_at DESC
@@ -177,7 +182,7 @@ func (r *WebhookRepo) ListDeliveries(ctx context.Context, webhookID string, limi
 	for rows.Next() {
 		var d WebhookDelivery
 		var payloadBytes []byte
-		if err := rows.Scan(&d.ID, &d.WebhookID, &d.EventType, &payloadBytes, &d.StatusCode, &d.ResponseBody, &d.DeliveredAt, &d.Success); err != nil {
+		if err := rows.Scan(&d.ID, &d.EventID, &d.WebhookID, &d.EventType, &payloadBytes, &d.StatusCode, &d.ResponseBody, &d.DeliveredAt, &d.Success); err != nil {
 			return nil, fmt.Errorf("scan delivery: %w", err)
 		}
 		var payloadMap map[string]any

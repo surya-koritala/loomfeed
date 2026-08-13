@@ -125,12 +125,16 @@ func (r *VoteRepo) CastVote(ctx context.Context, v *models.Vote) (int, error) {
 // CastWithReputation performs the vote and reputation update in a single transaction.
 // This merges the previously separate vote + reputation flows (2 transactions, 7+ queries)
 // into a single transaction (5 queries). If authorID is empty or equals the voter, the
-// reputation step is skipped.
+// reputation step is skipped. The returned active flag reports whether the
+// requested vote exists after the transaction (false when the request toggled
+// an identical vote off). The returned target-public flag is captured while
+// the target post is locked by the transaction, preventing a concurrent
+// quarantine transition from racing webhook visibility decisions.
 // Also awards a small trust bump (+0.1) to the voter for community participation (Bug 6 fix).
-func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, authorID, eventType string, scoreDelta float64) (int, error) {
+func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, authorID, eventType string, scoreDelta float64) (int, bool, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
+		return 0, false, false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -145,20 +149,22 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	).Scan(&existingID, &existingDirection)
 
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("check existing vote: %w", err)
+		return 0, false, false, fmt.Errorf("check existing vote: %w", err)
 	}
 
 	// Step 2: Mutate vote — one of delete / update / insert
+	voteActive := true
 	if err == nil {
 		if existingDirection == v.Direction {
 			_, err = tx.Exec(ctx, `DELETE FROM votes WHERE id = $1`, existingID)
 			if err != nil {
-				return 0, fmt.Errorf("delete vote (toggle off): %w", err)
+				return 0, false, false, fmt.Errorf("delete vote (toggle off): %w", err)
 			}
+			voteActive = false
 		} else {
 			_, err = tx.Exec(ctx, `UPDATE votes SET direction = $1 WHERE id = $2`, v.Direction, existingID)
 			if err != nil {
-				return 0, fmt.Errorf("update vote direction: %w", err)
+				return 0, false, false, fmt.Errorf("update vote direction: %w", err)
 			}
 		}
 	} else {
@@ -168,13 +174,14 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 			v.TargetID, v.TargetType, v.VoterID, v.VoterType, v.Direction,
 		)
 		if err != nil {
-			return 0, fmt.Errorf("insert vote: %w", err)
+			return 0, false, false, fmt.Errorf("insert vote: %w", err)
 		}
 	}
 
 	// Step 3: Recalculate vote_score. Two literal queries instead of
 	// one fmt.Sprintf'd template — see rationale in CastVote above.
 	var newScore int
+	targetPublic := false
 	if v.TargetType == models.TargetComment {
 		err = tx.QueryRow(ctx, `
 			UPDATE comments
@@ -187,6 +194,16 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 			RETURNING vote_score`,
 			v.TargetID, v.TargetType,
 		).Scan(&newScore)
+		if err == nil {
+			err = tx.QueryRow(ctx, `
+				SELECT c.deleted_at IS NULL
+				   AND p.deleted_at IS NULL
+				   AND NOT p.quarantined
+				FROM comments AS c
+				JOIN posts AS p ON p.id = c.post_id
+				WHERE c.id = $1
+				FOR SHARE OF p`, v.TargetID).Scan(&targetPublic)
+		}
 	} else {
 		err = tx.QueryRow(ctx, `
 			UPDATE posts
@@ -194,16 +211,16 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 				(SELECT SUM(CASE WHEN direction = 'up' THEN weight ELSE -weight END)
 				 FROM votes WHERE target_id = $1 AND target_type = $2), 0))::integer
 			WHERE id = $1
-			RETURNING vote_score`,
+			RETURNING vote_score, deleted_at IS NULL AND NOT quarantined`,
 			v.TargetID, v.TargetType,
-		).Scan(&newScore)
+		).Scan(&newScore, &targetPublic)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("recalculate vote_score: %w", err)
+		return 0, false, false, fmt.Errorf("recalculate vote_score: %w", err)
 	}
 	isRemoteReply, err := recomputeRemoteReplyTrustTx(ctx, tx, v.TargetID, v.TargetType)
 	if err != nil {
-		return 0, err
+		return 0, false, false, err
 	}
 
 	// Step 4: Reputation update for the content author. Uses the
@@ -214,15 +231,15 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	_ = scoreDelta // legacy arg, kept for signature stability
 	if authorID != "" && authorID != v.VoterID && !isRemoteReply {
 		if _, err := ApplyReputationEventTx(ctx, tx, authorID, eventType); err != nil {
-			return 0, err
+			return 0, false, false, err
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit tx: %w", err)
+		return 0, false, false, fmt.Errorf("commit tx: %w", err)
 	}
 
-	return newScore, nil
+	return newScore, voteActive, targetPublic, nil
 }
 
 // recomputeRemoteReplyTrustTx feeds the locally observed reception of a
