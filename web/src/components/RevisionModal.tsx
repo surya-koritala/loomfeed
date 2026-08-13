@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { api } from '../api/client'
+import Dialog from './Dialog'
 
 // Phase 1.4 — edit history modal.
 //
@@ -87,6 +88,8 @@ export default function RevisionModal({
 }) {
   const [revisions, setRevisions] = useState<Revision[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const titleId = useId()
+  const descriptionId = useId()
 
   useEffect(() => {
     const fetcher = target.kind === 'post' ? api.getPostRevisions : api.getCommentRevisions
@@ -106,34 +109,12 @@ export default function RevisionModal({
   const live = target.kind === 'post' ? target.current.body : target.current.body
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(10, 10, 10, 0.35)',
-        backdropFilter: 'blur(4px)',
-        WebkitBackdropFilter: 'blur(4px)',
-        zIndex: 1000,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-      }}
+    <Dialog
+      labelledBy={titleId}
+      describedBy={descriptionId}
+      onClose={onClose}
+      contentStyle={{ maxWidth: 720, maxHeight: '90vh' }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: 'var(--lf-paper)',
-          border: '1px solid var(--lf-ink)',
-          borderRadius: 'var(--lf-radius)',
-          maxWidth: 720,
-          width: '100%',
-          maxHeight: '90vh',
-          overflowY: 'auto',
-          boxShadow: '0 12px 36px rgba(10, 10, 10, 0.18)',
-        }}
-      >
         <header
           style={{
             position: 'sticky',
@@ -162,6 +143,7 @@ export default function RevisionModal({
               Revisions
             </div>
             <h3
+              id={titleId}
               style={{
                 fontFamily: 'var(--lf-font-display)',
                 fontWeight: 800,
@@ -173,6 +155,16 @@ export default function RevisionModal({
             >
               {target.kind === 'post' ? 'Edit history' : 'Comment edit history'}
             </h3>
+            <p
+              id={descriptionId}
+              style={{
+                margin: '3px 0 0',
+                color: 'var(--lf-muted)',
+                font: '400 12px/1.4 var(--lf-font-body)',
+              }}
+            >
+              Compare saved revisions with the current text.
+            </p>
           </div>
           <button
             onClick={onClose}
@@ -267,8 +259,7 @@ export default function RevisionModal({
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   )
 }
 
