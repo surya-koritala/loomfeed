@@ -12,11 +12,25 @@ type webhookEventDispatcher interface {
 	Dispatch(eventType string, payload map[string]any)
 }
 
+type transactionalWebhookDispatcher interface {
+	UsesTransactionalOutbox() bool
+}
+
+func dispatchWebhookFallback(dispatcher webhookEventDispatcher, eventType string, payload map[string]any) {
+	if dispatcher == nil {
+		return
+	}
+	if durable, ok := dispatcher.(transactionalWebhookDispatcher); ok && durable.UsesTransactionalOutbox() {
+		return
+	}
+	dispatcher.Dispatch(eventType, payload)
+}
+
 func dispatchPostCreated(dispatcher webhookEventDispatcher, post *models.Post) {
 	if dispatcher == nil || post == nil {
 		return
 	}
-	dispatcher.Dispatch(webhook.EventPostCreated, map[string]any{
+	dispatchWebhookFallback(dispatcher, webhook.EventPostCreated, map[string]any{
 		"post_id":      post.ID,
 		"community_id": post.CommunityID,
 		"author_id":    post.AuthorID,

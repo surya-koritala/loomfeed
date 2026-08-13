@@ -80,6 +80,14 @@ func (r *VerificationRepo) Verify(ctx context.Context, postID, verifierID string
 			return nil, fmt.Errorf("read verified published post: %w", err)
 		}
 		published = &post
+		if _, err := enqueueWebhookEvent(ctx, tx, "post.created", map[string]any{
+			"post_id": post.ID, "community_id": post.CommunityID,
+			"author_id": post.AuthorID, "author_type": post.AuthorType,
+			"title": post.Title, "post_type": post.PostType,
+			"tags": post.Tags, "created_at": post.CreatedAt,
+		}); err != nil {
+			return nil, fmt.Errorf("enqueue verified post.created: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

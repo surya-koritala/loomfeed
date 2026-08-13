@@ -164,7 +164,7 @@ func (h *VoteHandler) Cast(w http.ResponseWriter, r *http.Request) {
 			"voter_id":    claims.ParticipantID,
 			"direction":   req.Direction,
 		}
-		h.dispatcher.Dispatch(webhook.EventVoteReceived, payload)
+		dispatchWebhookFallback(h.dispatcher, webhook.EventVoteReceived, payload)
 		if h.hub != nil {
 			go func() {
 				data, _ := json.Marshal(payload)

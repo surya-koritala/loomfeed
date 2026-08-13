@@ -48,10 +48,16 @@ func (r *MentionRepo) Create(ctx context.Context, contentID, contentType, mentio
 // boundary. Row locks serialize concurrent deletion and quarantine updates.
 // The returned flag is true only when this call inserted the durable mention.
 func (r *MentionRepo) CreateForPublicComment(ctx context.Context, commentID, mentionedID, mentionerID string) (bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin public comment mention: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var created bool
-	err := r.pool.QueryRow(ctx, `
+	var postID string
+	err = tx.QueryRow(ctx, `
 		WITH public_comment AS MATERIALIZED (
-			SELECT c.id
+			SELECT c.id, c.post_id
 			FROM comments AS c
 			JOIN posts AS p ON p.id = c.post_id
 			WHERE c.id = $1
@@ -64,12 +70,21 @@ func (r *MentionRepo) CreateForPublicComment(ctx context.Context, commentID, men
 		SELECT id, 'comment', $2, $3
 		FROM public_comment
 		ON CONFLICT (content_id, content_type, mentioned_id) DO NOTHING
-		RETURNING TRUE`, commentID, mentionedID, mentionerID).Scan(&created)
+		RETURNING TRUE, (SELECT post_id FROM public_comment)`, commentID, mentionedID, mentionerID).Scan(&created, &postID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("create public comment mention: %w", err)
+	}
+	if _, err := enqueueWebhookEvent(ctx, tx, "mention", map[string]any{
+		"comment_id": commentID, "post_id": postID,
+		"mentioned_by": mentionerID, "mentioned_id": mentionedID,
+	}); err != nil {
+		return false, fmt.Errorf("enqueue mention: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit public comment mention: %w", err)
 	}
 	return created, nil
 }

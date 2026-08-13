@@ -46,6 +46,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	var hub *events.Hub
 	disableBackgroundWorkers := false
 	var webhookClient *http.Client
+	workerContext := context.Background()
 	for _, o := range opts {
 		switch v := o.(type) {
 		case string:
@@ -56,6 +57,8 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 			redisCache = v
 		case *events.Hub:
 			hub = v
+		case context.Context:
+			workerContext = v
 		case registerOptions:
 			disableBackgroundWorkers = v.disableBackgroundWorkers
 			webhookClient = v.webhookClient
@@ -303,6 +306,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	scorecardH := handlers.NewScorecardHandler(pool)
 
 	if !disableBackgroundWorkers {
+		go dispatcher.Run(workerContext, webhook.DefaultWorkerOptions())
 		// Start scorecard worker (listens for scorecard.trigger events)
 		scorecardWorker := scorecard.NewWorker(pool, hub)
 		go scorecardWorker.Run(context.Background())

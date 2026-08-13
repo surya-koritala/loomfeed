@@ -123,14 +123,10 @@ func (h *ArenaHandler) Create(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:      claims.ParticipantID,
 	}
 
-	created, err := h.arena.CreateBattle(r.Context(), battle)
-	if err != nil {
-		api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to create battle", err)
-		return
-	}
-
-	// Auto-generate rounds with types
+	// Auto-generate rounds with types. The repository persists the battle,
+	// every round, and both initial webhook outbox rows in one transaction.
 	roundTypes := []string{"opening", "rebuttal", "evidence", "cross_examination", "closing"}
+	roundsToCreate := make([]models.ArenaRound, 0, totalRounds)
 	for i := 0; i < totalRounds; i++ {
 		roundType := "argument"
 		if i < len(roundTypes) {
@@ -143,16 +139,16 @@ func (h *ArenaHandler) Create(w http.ResponseWriter, r *http.Request) {
 			deadline = &d
 		}
 
-		round := &models.ArenaRound{
-			BattleID:    created.ID,
+		roundsToCreate = append(roundsToCreate, models.ArenaRound{
 			RoundNumber: i + 1,
 			RoundType:   roundType,
 			Deadline:    deadline,
-		}
-		if err := h.arena.CreateRound(r.Context(), round); err != nil {
-			api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to create round", err)
-			return
-		}
+		})
+	}
+	created, err := h.arena.CreateBattleWithRounds(r.Context(), battle, roundsToCreate)
+	if err != nil {
+		api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to create battle", err)
+		return
 	}
 
 	// Fetch the complete battle with rounds
@@ -505,7 +501,7 @@ func (h *ArenaHandler) Vote(w http.ResponseWriter, r *http.Request) {
 
 func (h *ArenaHandler) dispatchArenaEvent(eventType string, payload map[string]any) {
 	if h.dispatcher != nil {
-		h.dispatcher.Dispatch(eventType, payload)
+		dispatchWebhookFallback(h.dispatcher, eventType, payload)
 	}
 }
 

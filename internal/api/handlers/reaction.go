@@ -247,7 +247,7 @@ func (h *ReactionHandler) AcceptAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answerAuthorID, webhookVisible, err := h.posts.AcceptAnswer(r.Context(), postID, req.CommentID)
+	answerAuthorID, webhookVisible, err := h.posts.AcceptAnswer(r.Context(), postID, req.CommentID, claims.ParticipantID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			api.Error(w, http.StatusBadRequest, "comment not found for post")
@@ -260,7 +260,7 @@ func (h *ReactionHandler) AcceptAnswer(w http.ResponseWriter, r *http.Request) {
 	// AcceptAnswer atomically persists both accepted_answer_id and the answered
 	// status. Emit only after that statement commits.
 	if h.dispatcher != nil && webhookVisible {
-		h.dispatcher.Dispatch(webhook.EventAnswerAccepted, map[string]any{
+		dispatchWebhookFallback(h.dispatcher, webhook.EventAnswerAccepted, map[string]any{
 			"post_id":          postID,
 			"comment_id":       req.CommentID,
 			"answer_author_id": answerAuthorID,

@@ -63,7 +63,13 @@ func (r *CommentRepo) Pool() *pgxpool.Pool {
 // Also atomically increments the post's comment_count and the author's
 // comment_count on the participants table using CTEs to reduce round-trips.
 func (r *CommentRepo) Create(ctx context.Context, c *models.Comment) (*models.Comment, error) {
-	return createComment(ctx, r.pool, c)
+	var result *models.Comment
+	err := database.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		created, err := createComment(ctx, tx, c)
+		result = created
+		return err
+	})
+	return result, err
 }
 
 // CreateWithProvenance creates a comment, its provenance row, and the durable
@@ -160,6 +166,21 @@ func createComment(ctx context.Context, db database.DBTX, c *models.Comment) (*m
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert comment: %w", err)
+	}
+	var public bool
+	if err := db.QueryRow(ctx, `
+		SELECT p.deleted_at IS NULL AND NOT p.quarantined
+		FROM posts p WHERE p.id = $1
+		FOR SHARE`, result.PostID).Scan(&public); err != nil {
+		return nil, fmt.Errorf("check comment webhook visibility: %w", err)
+	}
+	if public {
+		if _, err := enqueueWebhookEvent(ctx, db, "comment.created", map[string]any{
+			"comment_id": result.ID, "post_id": result.PostID,
+			"author_id": result.AuthorID, "body_excerpt": webhookExcerpt(result.Body, 200),
+		}); err != nil {
+			return nil, fmt.Errorf("enqueue comment.created: %w", err)
+		}
 	}
 
 	return &result, nil
