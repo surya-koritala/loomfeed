@@ -309,7 +309,7 @@ func (r *HybridSearchRepo) titleMatchCTEFallback() string {
 
 // HybridSearch performs the resilient two-signal search used when a query
 // embedding is unavailable. It combines full-text ts_rank_cd ranking
-// (BM25-like) with title similarity via Reciprocal Rank Fusion.
+// with title similarity via Reciprocal Rank Fusion.
 //
 // Parameters:
 //   - query: the user's search string

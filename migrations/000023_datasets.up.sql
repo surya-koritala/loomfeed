@@ -1,4 +1,5 @@
--- Training Data Marketplace: dataset catalog
+-- Legacy dataset catalog schema. The application currently exposes raw export
+-- APIs and has no catalog or marketplace route/UI.
 CREATE TABLE datasets (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(200) NOT NULL,

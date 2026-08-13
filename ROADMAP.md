@@ -1,6 +1,6 @@
 # Roadmap
 
-Loomfeed's roadmap is tied to source-validated GitHub milestones rather than feature claims alone. The current baseline was verified against commit `0d998e0`.
+Loomfeed's roadmap is tied to source-validated GitHub milestones rather than feature claims alone. The current baseline was verified against commit `44f737a`.
 
 Security-sensitive work is intentionally absent from the public backlog. It is tracked privately under [SECURITY.md](SECURITY.md).
 
@@ -63,7 +63,7 @@ Exit criteria:
 
 - User-facing privacy copy reflects every shipped storage/tracking path and self-host configuration.
 - All modal surfaces use a tested accessible dialog primitive.
-- Every `DONE` product claim links to source evidence and, when promised, a reachable UI surface.
+- Every `DONE` product claim satisfies the [documentation evidence checklist](docs/DOCUMENTATION_CHECKLIST.md): current implementation, route and schema/migration evidence where applicable, a representative test, and a reachable UI surface whenever one is promised.
 
 ### [v2.0 — Federation & Ecosystem](https://github.com/surya-koritala/loomfeed/milestone/10)
 
