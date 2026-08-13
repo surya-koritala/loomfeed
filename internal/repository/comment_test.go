@@ -110,6 +110,58 @@ func TestCommentRepo_CreateNested(t *testing.T) {
 	}
 }
 
+func TestCommentRepo_CreateWithProvenance_RollsBackWhenProvenanceFails(t *testing.T) {
+	pool := database.TestPool(t)
+	database.CleanupTables(t, pool, "provenances", "comments", "posts", "communities", "participants")
+
+	participantRepo := repository.NewParticipantRepo(pool)
+	communityRepo := repository.NewCommunityRepo(pool)
+	postRepo := repository.NewPostRepo(pool)
+	commentRepo := repository.NewCommentRepo(pool)
+	ctx := context.Background()
+
+	owner := createTestOwner(t, participantRepo, ctx, "comment-provenance-rollback")
+	community := createTestCommunity(t, communityRepo, ctx, owner.ID, "comment-provenance-rollback")
+	post := createTestPost(t, postRepo, ctx, community.ID, owner.ID, "Comment Provenance Rollback")
+
+	_, err := commentRepo.CreateWithProvenance(ctx, &models.Comment{
+		PostID:     post.ID,
+		AuthorID:   owner.ID,
+		AuthorType: models.ParticipantHuman,
+		Body:       "This comment must not survive a provenance failure.",
+	}, &models.Provenance{
+		Sources:          []string{"https://example.com/source"},
+		GenerationMethod: models.GenerationMethod("invalid_generation_method"),
+	})
+	if err == nil {
+		t.Fatal("expected invalid provenance generation method to fail")
+	}
+
+	comments, listErr := commentRepo.ListByPost(ctx, post.ID, "new", 10, 0, "", "")
+	if listErr != nil {
+		t.Fatalf("ListByPost after rollback: %v", listErr)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("expected no comment after provenance rollback, got %d", len(comments))
+	}
+
+	persistedPost, getPostErr := postRepo.GetByID(ctx, post.ID)
+	if getPostErr != nil {
+		t.Fatalf("GetByID post after rollback: %v", getPostErr)
+	}
+	if persistedPost.CommentCount != 0 {
+		t.Fatalf("expected post comment_count rollback to 0, got %d", persistedPost.CommentCount)
+	}
+
+	persistedOwner, getOwnerErr := participantRepo.GetByID(ctx, owner.ID)
+	if getOwnerErr != nil {
+		t.Fatalf("GetByID owner after rollback: %v", getOwnerErr)
+	}
+	if persistedOwner.CommentCount != 0 {
+		t.Fatalf("expected participant comment_count rollback to 0, got %d", persistedOwner.CommentCount)
+	}
+}
+
 func TestCommentRepo_ListByPost(t *testing.T) {
 	pool := database.TestPool(t)
 	database.CleanupTables(t, pool, "reputation_events", "reactions", "votes", "comments", "provenances", "posts", "community_subscriptions", "communities", "api_keys", "agent_identities", "human_users", "participants")

@@ -257,7 +257,20 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ThreadType:      req.ThreadType,
 	}
 
-	result, err := h.comments.Create(r.Context(), comment)
+	var result *models.Comment
+	var err error
+	if len(req.Sources) > 0 {
+		var confidence float64
+		if req.ConfidenceScore != nil {
+			confidence = *req.ConfidenceScore
+		}
+		result, err = h.comments.CreateWithProvenance(r.Context(), comment, &models.Provenance{
+			Sources:         req.Sources,
+			ConfidenceScore: confidence,
+		})
+	} else {
+		result, err = h.comments.Create(r.Context(), comment)
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || strings.Contains(err.Error(), "parent comment not found") {
 			api.Error(w, http.StatusBadRequest, "parent comment not found")

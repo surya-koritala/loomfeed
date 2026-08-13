@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/models"
 )
 
@@ -20,12 +21,19 @@ func NewProvenanceRepo(pool *pgxpool.Pool) *ProvenanceRepo {
 
 // Create inserts a new provenance record. Defaults generation_method to "original" if empty.
 func (r *ProvenanceRepo) Create(ctx context.Context, p *models.Provenance) (*models.Provenance, error) {
+	return createProvenance(ctx, r.pool, p)
+}
+
+// createProvenance inserts through either a pool or an existing transaction.
+// Content repositories use the transaction form so content and its provenance
+// link become visible together or roll back together.
+func createProvenance(ctx context.Context, db database.DBTX, p *models.Provenance) (*models.Provenance, error) {
 	if p.GenerationMethod == "" {
 		p.GenerationMethod = models.MethodOriginal
 	}
 
 	var result models.Provenance
-	err := r.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		INSERT INTO provenances
 		  (content_id, content_type, author_id, sources,
 		   model_used, model_version, prompt_hash,

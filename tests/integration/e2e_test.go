@@ -51,7 +51,6 @@ func doJSON(client *http.Client, baseURL, method, path string, body any, token s
 	return result, resp.StatusCode, nil
 }
 
-
 // doJSONArray performs an HTTP request and decodes the response as a JSON array.
 // Used for endpoints that return a bare JSON array (not a paginated object).
 func doJSONArray(client *http.Client, baseURL, method, path string, body any, token string) ([]any, int, error) {
@@ -117,6 +116,49 @@ func getNestedString(t *testing.T, m map[string]any, outerKey, innerKey string) 
 		t.Fatalf("expected %q to be a map, got %T: %v", outerKey, outer, outer)
 	}
 	return getString(t, nested, innerKey)
+}
+
+func assertJSONProvenanceSources(t *testing.T, content map[string]any, want []string) {
+	t.Helper()
+	provenanceValue, ok := content["provenance"]
+	if !ok {
+		t.Fatalf("expected provenance in response: %v", content)
+	}
+	provenance, ok := provenanceValue.(map[string]any)
+	if !ok {
+		t.Fatalf("expected provenance object, got %T: %v", provenanceValue, provenanceValue)
+	}
+	sourcesValue, ok := provenance["sources"]
+	if !ok {
+		t.Fatalf("expected provenance sources: %v", provenance)
+	}
+	sources, ok := sourcesValue.([]any)
+	if !ok {
+		t.Fatalf("expected provenance sources array, got %T: %v", sourcesValue, sourcesValue)
+	}
+	if len(sources) != len(want) {
+		t.Fatalf("expected %d provenance sources, got %d: %v", len(want), len(sources), sources)
+	}
+	for i, source := range want {
+		if sources[i] != source {
+			t.Fatalf("provenance source[%d] = %v, want %q", i, sources[i], source)
+		}
+	}
+}
+
+func assertJSONFeedPostSources(t *testing.T, feed []any, postID string, want []string) {
+	t.Helper()
+	for _, item := range feed {
+		post, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if post["id"] == postID {
+			assertJSONProvenanceSources(t, post, want)
+			return
+		}
+	}
+	t.Fatalf("expected feed to contain post %s", postID)
 }
 
 func TestE2E_HappyPath(t *testing.T) {
@@ -249,7 +291,8 @@ func TestE2E_HappyPath(t *testing.T) {
 		"community_id": communityID,
 		"title":        "Hello World",
 		"body":         "This is the first post in the e2e test.",
-		"post_type": "text",
+		"post_type":    "text",
+		"sources":      []string{"https://example.com/post-source"},
 	}
 	postResp, status, err := doJSON(client, base, http.MethodPost, "/api/v1/posts", postBody, token)
 	if err != nil {
@@ -263,6 +306,7 @@ func TestE2E_HappyPath(t *testing.T) {
 	if postTitle != "Hello World" {
 		t.Fatalf("expected post title=Hello World, got %q", postTitle)
 	}
+	assertJSONProvenanceSources(t, postResp, []string{"https://example.com/post-source"})
 	t.Logf("created post: id=%s title=%s", postID, postTitle)
 
 	// -----------------------------------------------------------------------
@@ -285,6 +329,7 @@ func TestE2E_HappyPath(t *testing.T) {
 	if authorDisplayName != "Alice" {
 		t.Fatalf("expected author display_name=Alice, got %q", authorDisplayName)
 	}
+	assertJSONProvenanceSources(t, getPostResp, []string{"https://example.com/post-source"})
 	t.Logf("get post: author=%s", authorDisplayName)
 
 	// -----------------------------------------------------------------------
@@ -292,7 +337,8 @@ func TestE2E_HappyPath(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log("Step 8: POST /api/v1/posts/{id}/comments")
 	commentBody := map[string]any{
-		"body": "Great post! This is a test comment.",
+		"body":    "Great post! This is a test comment.",
+		"sources": []string{"https://example.org/comment-source"},
 	}
 	commentResp, status, err := doJSON(client, base, http.MethodPost, "/api/v1/posts/"+postID+"/comments", commentBody, token)
 	if err != nil {
@@ -302,6 +348,7 @@ func TestE2E_HappyPath(t *testing.T) {
 		t.Fatalf("expected 201 from create comment, got %d: %v", status, commentResp)
 	}
 	commentID := getString(t, commentResp, "id")
+	assertJSONProvenanceSources(t, commentResp, []string{"https://example.org/comment-source"})
 	t.Logf("created comment: id=%s", commentID)
 
 	// -----------------------------------------------------------------------
@@ -319,6 +366,14 @@ func TestE2E_HappyPath(t *testing.T) {
 	if len(commentsList) == 0 {
 		t.Fatal("expected at least one comment in list")
 	}
+	persistedComment, ok := commentsList[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected comment object, got %T: %v", commentsList[0], commentsList[0])
+	}
+	if gotID := getString(t, persistedComment, "id"); gotID != commentID {
+		t.Fatalf("listed comment id=%q, want %q", gotID, commentID)
+	}
+	assertJSONProvenanceSources(t, persistedComment, []string{"https://example.org/comment-source"})
 	t.Logf("list comments returned %d comments", len(commentsList))
 
 	// -----------------------------------------------------------------------
@@ -365,6 +420,7 @@ func TestE2E_HappyPath(t *testing.T) {
 	if len(feedList) == 0 {
 		t.Fatal("expected at least one post in global feed")
 	}
+	assertJSONFeedPostSources(t, feedList, postID, []string{"https://example.com/post-source"})
 	t.Logf("global feed returned %d posts", len(feedList))
 
 	// -----------------------------------------------------------------------
@@ -390,6 +446,7 @@ func TestE2E_HappyPath(t *testing.T) {
 	if len(commFeedList) == 0 {
 		t.Fatal("expected at least one post in community feed")
 	}
+	assertJSONFeedPostSources(t, commFeedList, postID, []string{"https://example.com/post-source"})
 	t.Logf("community feed returned %d posts", len(commFeedList))
 
 	// -----------------------------------------------------------------------
@@ -426,13 +483,9 @@ func TestE2E_HappyPath(t *testing.T) {
 	// -----------------------------------------------------------------------
 	// Step 14: Create agent post
 	// Note: POST /api/v1/posts uses middleware.Auth (JWT only), not CombinedAuth.
-	// The API key middleware (apikey.go) is not wired into this route.
-	// Agent posts must therefore use the human owner's Bearer token.
-	// Provenance auto-creation requires participant_type="agent" in JWT claims —
-	// which is only set when authenticated via X-API-Key. Since the route uses
-	// JWT-only auth, the post will be created without auto-provenance here.
-	// The sources and confidence_score fields are still submitted as part of the
-	// request body to confirm the handler accepts them without error.
+	// The API key middleware (apikey.go) is not wired into this route, so this
+	// request is attributed to the human owner. Sources are nevertheless durable
+	// for every author and are verified again through the detail read below.
 	// -----------------------------------------------------------------------
 	t.Log("Step 14: POST /api/v1/posts (agent post submitted via owner JWT — JWT-only route)")
 	confidenceScore := 0.92
@@ -473,6 +526,7 @@ func TestE2E_HappyPath(t *testing.T) {
 	if fetchedTitle != "Agent Generated Post" {
 		t.Fatalf("expected title='Agent Generated Post', got %q", fetchedTitle)
 	}
+	assertJSONProvenanceSources(t, getAgentPostResp, []string{"https://example.com/source1", "https://example.com/source2"})
 	t.Logf("get agent post: title=%s", fetchedTitle)
 
 	// -----------------------------------------------------------------------

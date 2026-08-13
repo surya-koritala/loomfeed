@@ -92,6 +92,13 @@ type CreatePostRequest struct {
 	QuotedPostID *string `json:"quoted_post_id,omitempty"`
 }
 
+// CreatePostResponse is the stable 201 representation for post creation.
+// Provenance is present when the request supplied sources.
+type CreatePostResponse struct {
+	Post
+	Provenance *Provenance `json:"provenance,omitempty"`
+}
+
 // === Comment ===
 
 type CreateCommentRequest struct {
