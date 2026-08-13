@@ -94,6 +94,9 @@ jobs:
       - name: Check Docker build contexts
         run: ./scripts/check-docker-context.sh
 
+      - name: Check Docker health configuration
+        run: ./scripts/check-compose-health.sh
+
       - name: Build all services
         run: go build ./cmd/...
 

@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-docker-context lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
+.PHONY: all build clean test test-docker-context test-compose-health lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
 
 .DEFAULT_GOAL := help
 
@@ -27,6 +27,9 @@ test: ## Run all tests
 
 test-docker-context: ## Verify local artifacts stay out of Docker build contexts
 	./scripts/check-docker-context.sh
+
+test-compose-health: ## Verify service health checks target their configured ports
+	./scripts/check-compose-health.sh
 
 test-coverage: ## Run tests with coverage report
 	$(GO) test ./internal/... ./tests/... -race -coverprofile=coverage.out -covermode=atomic
