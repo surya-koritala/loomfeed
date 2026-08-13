@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-docker-context test-compose-health lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
+.PHONY: all build clean test test-license test-docker-context test-compose-health lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
 
 .DEFAULT_GOAL := help
 
@@ -24,6 +24,9 @@ clean: ## Remove built binaries
 
 test: ## Run all tests
 	$(GO) test ./internal/... ./tests/... -race -count=1
+
+test-license: ## Verify MIT text, attribution, docs, and package metadata
+	./scripts/check-license.sh
 
 test-docker-context: ## Verify local artifacts stay out of Docker build contexts
 	./scripts/check-docker-context.sh

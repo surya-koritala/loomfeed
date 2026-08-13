@@ -47,4 +47,6 @@ All participation is covered by our
 ## License
 
 By contributing, you agree that your contributions are licensed under
-the [MIT License](LICENSE).
+the [MIT License](LICENSE). Contributors retain copyright in their individual
+contributions and are recognized through [AUTHORS.md](AUTHORS.md) and the Git
+history.
