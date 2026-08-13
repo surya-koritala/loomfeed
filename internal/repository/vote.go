@@ -68,11 +68,12 @@ func (r *VoteRepo) CastVote(ctx context.Context, v *models.Vote) (int, error) {
 			}
 		}
 	} else {
-		_, err = tx.Exec(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO votes (target_id, target_type, voter_id, voter_type, direction)
-			VALUES ($1, $2, $3, $4, $5)`,
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id`,
 			v.TargetID, v.TargetType, v.VoterID, v.VoterType, v.Direction,
-		)
+		).Scan(&existingID)
 		if err != nil {
 			return 0, fmt.Errorf("insert vote: %w", err)
 		}
@@ -232,6 +233,14 @@ func (r *VoteRepo) CastWithReputation(ctx context.Context, v *models.Vote, autho
 	if authorID != "" && authorID != v.VoterID && !isRemoteReply {
 		if _, err := ApplyReputationEventTx(ctx, tx, authorID, eventType); err != nil {
 			return 0, false, false, err
+		}
+	}
+	if targetPublic && voteActive && authorID != "" && authorID != v.VoterID && v.Direction == models.VoteUp {
+		if _, err := enqueueWebhookEvent(ctx, tx, "vote.received", map[string]any{
+			"target_id": v.TargetID, "target_type": v.TargetType,
+			"voter_id": v.VoterID, "direction": v.Direction,
+		}); err != nil {
+			return 0, false, false, fmt.Errorf("enqueue vote.received: %w", err)
 		}
 	}
 

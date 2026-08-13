@@ -22,6 +22,17 @@ type arenaDeadlineDispatcher interface {
 	Dispatch(string, map[string]any)
 }
 
+type transactionalArenaDeadlineDispatcher interface {
+	UsesTransactionalOutbox() bool
+}
+
+func dispatchArenaDeadlineFallback(dispatcher arenaDeadlineDispatcher, eventType string, payload map[string]any) {
+	if durable, ok := dispatcher.(transactionalArenaDeadlineDispatcher); ok && durable.UsesTransactionalOutbox() {
+		return
+	}
+	dispatcher.Dispatch(eventType, payload)
+}
+
 // ArenaDeadlineWorker advances battles even when participants or voters leave.
 // Database row locks make it safe to run on every API replica.
 type ArenaDeadlineWorker struct {
@@ -56,7 +67,7 @@ func (w *ArenaDeadlineWorker) Sweep(ctx context.Context, now time.Time) (int, er
 					"battle_id", transition.BattleID, "round", transition.OpenedRound,
 					"battle_error", battleErr, "round_error", roundErr)
 			} else {
-				w.dispatcher.Dispatch(arenaevents.RoundOpened, arenaevents.RoundPayload(battle, round))
+				dispatchArenaDeadlineFallback(w.dispatcher, arenaevents.RoundOpened, arenaevents.RoundPayload(battle, round))
 			}
 		}
 		if transition.Completed {
@@ -64,7 +75,7 @@ func (w *ArenaDeadlineWorker) Sweep(ctx context.Context, now time.Time) (int, er
 			if battleErr != nil {
 				slog.Warn("arena deadline: load completed payload failed", "battle_id", transition.BattleID, "error", battleErr)
 			} else {
-				w.dispatcher.Dispatch(arenaevents.BattleCompleted, arenaevents.CompletedPayload(battle))
+				dispatchArenaDeadlineFallback(w.dispatcher, arenaevents.BattleCompleted, arenaevents.CompletedPayload(battle))
 			}
 		}
 	}

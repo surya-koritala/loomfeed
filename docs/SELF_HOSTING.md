@@ -198,6 +198,22 @@ duplicate scheduling and makes explicit failures safe to retry, but it cannot
 create an exactly-once guarantee that the configured SMTP provider does not
 offer.
 
+## Durable webhook delivery
+
+Webhook events and per-subscriber jobs are written to PostgreSQL in the same
+transaction as their public source mutation. Every API replica runs eight
+workers, but row leases allow only one replica to own a job and only one
+in-flight request per webhook destination. An expired 30-second claim is
+recovered automatically after a process restart.
+
+Transient delivery failures retry at 1, 2, 4, 8, and 16 minutes, for six total
+attempts. Permanent HTTP failures and exhausted retries become `dead`; ten
+consecutive failures deactivate a webhook and cancel its remaining jobs.
+Owners can inspect current status and the last attempt through
+`GET /api/v1/webhooks/{id}/deliveries`. Receivers should use the stable event
+`id` as their idempotency key because an ambiguous network failure can still
+result in the same signed request being delivered more than once.
+
 ## Real-time SSE delivery
 
 The API sends participant notifications and live post comments over

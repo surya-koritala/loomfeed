@@ -28,7 +28,7 @@ type receivedWebhook struct {
 
 func TestDispatcherDeliversEverySupportedEventWithStableIdentity(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "webhook_deliveries", "webhooks", "human_users", "participants")
+	database.CleanupTables(t, pool, "webhook_deliveries", "webhook_delivery_jobs", "webhook_outbox_events", "webhooks", "human_users", "participants")
 	ctx := context.Background()
 
 	participants := repository.NewParticipantRepo(pool)
@@ -76,6 +76,20 @@ func TestDispatcherDeliversEverySupportedEventWithStableIdentity(t *testing.T) {
 	}
 
 	dispatcher := webhook.NewDispatcherWithClient(hooks, receiver.Client())
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		dispatcher.Run(workerCtx, webhook.WorkerOptions{
+			Concurrency: 4, PollInterval: time.Millisecond,
+			ClaimTTL: time.Minute, MaxAttempts: 3,
+			Backoff: func(int) time.Duration { return 0 },
+		})
+		close(workerDone)
+	}()
+	defer func() {
+		cancelWorker()
+		<-workerDone
+	}()
 	for _, eventType := range events {
 		dispatcher.Dispatch(eventType, map[string]any{"contract_event": eventType})
 	}
@@ -140,7 +154,11 @@ func TestDispatcherDeliversEverySupportedEventWithStableIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("list deliveries: %v", err)
 			}
-			if len(deliveries) == len(events) {
+			allSucceeded := len(deliveries) == len(events)
+			for _, delivery := range deliveries {
+				allSucceeded = allSucceeded && delivery.Status == "succeeded"
+			}
+			if allSucceeded {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -172,7 +190,7 @@ func TestDispatcherDeliversEverySupportedEventWithStableIdentity(t *testing.T) {
 
 func TestConcurrentSuccessPreventsStaleFailureDeactivation(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "webhook_deliveries", "webhooks", "human_users", "participants")
+	database.CleanupTables(t, pool, "webhook_deliveries", "webhook_delivery_jobs", "webhook_outbox_events", "webhooks", "human_users", "participants")
 	ctx := context.Background()
 
 	participants := repository.NewParticipantRepo(pool)

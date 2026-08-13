@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/surya-koritala/loomfeed/internal/arenaevents"
+	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/models"
 )
 
@@ -21,13 +23,52 @@ func NewArenaRepo(pool *pgxpool.Pool) *ArenaRepo {
 	return &ArenaRepo{pool: pool}
 }
 
+func loadArenaBattleEvent(ctx context.Context, db database.DBTX, id string) (*models.ArenaBattle, error) {
+	var b models.ArenaBattle
+	err := db.QueryRow(ctx, `
+		SELECT ab.id, ab.topic, COALESCE(ab.description, ''),
+		       ab.agent_a_id, COALESCE(pa.display_name, ''),
+		       ab.agent_b_id, COALESCE(pb.display_name, ''),
+		       ab.format, ab.status, ab.total_rounds, ab.current_round,
+		       ab.round_time_limit, ab.word_limit, COALESCE(ab.rules, ''),
+		       ab.trust_stake, ab.settled_stake, ab.stake_settled_at,
+		       ab.winner_id, ab.voter_count, ab.created_by, ab.created_at, ab.completed_at
+		FROM arena_battles ab
+		LEFT JOIN participants pa ON pa.id = ab.agent_a_id
+		LEFT JOIN participants pb ON pb.id = ab.agent_b_id
+		WHERE ab.id = $1`, id).Scan(
+		&b.ID, &b.Topic, &b.Description,
+		&b.AgentAID, &b.AgentAName, &b.AgentBID, &b.AgentBName,
+		&b.Format, &b.Status, &b.TotalRounds, &b.CurrentRound,
+		&b.RoundTimeLimit, &b.WordLimit, &b.Rules,
+		&b.TrustStake, &b.SettledStake, &b.StakeSettledAt,
+		&b.WinnerID, &b.VoterCount, &b.CreatedBy, &b.CreatedAt, &b.CompletedAt,
+	)
+	return &b, err
+}
+
+func loadArenaRoundEvent(ctx context.Context, db database.DBTX, battleID string, roundNumber int) (*models.ArenaRound, error) {
+	var round models.ArenaRound
+	err := db.QueryRow(ctx, `
+		SELECT id, battle_id, round_number, round_type, deadline, created_at
+		FROM arena_rounds WHERE battle_id = $1 AND round_number = $2`, battleID, roundNumber).Scan(
+		&round.ID, &round.BattleID, &round.RoundNumber, &round.RoundType,
+		&round.Deadline, &round.CreatedAt,
+	)
+	return &round, err
+}
+
 // CreateBattle inserts a new arena battle.
 func (r *ArenaRepo) CreateBattle(ctx context.Context, battle *models.ArenaBattle) (*models.ArenaBattle, error) {
+	return createArenaBattle(ctx, r.pool, battle)
+}
+
+func createArenaBattle(ctx context.Context, db database.DBTX, battle *models.ArenaBattle) (*models.ArenaBattle, error) {
 	if battle.TrustStake < 0 || math.IsNaN(battle.TrustStake) || math.IsInf(battle.TrustStake, 0) {
 		return nil, fmt.Errorf("create arena battle: trust stake must be a finite non-negative number")
 	}
 	var b models.ArenaBattle
-	err := r.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		INSERT INTO arena_battles (topic, description, agent_a_id, agent_b_id, format, status,
 		                           total_rounds, current_round, round_time_limit, word_limit,
 		                           rules, trust_stake, created_by)
@@ -51,6 +92,57 @@ func (r *ArenaRepo) CreateBattle(ctx context.Context, battle *models.ArenaBattle
 		return nil, fmt.Errorf("create arena battle: %w", err)
 	}
 	return &b, nil
+}
+
+// CreateBattleWithRounds persists the complete challenge and its initial
+// lifecycle events atomically, so no worker can observe a partial battle.
+func (r *ArenaRepo) CreateBattleWithRounds(
+	ctx context.Context,
+	battle *models.ArenaBattle,
+	rounds []models.ArenaRound,
+) (*models.ArenaBattle, error) {
+	if len(rounds) == 0 {
+		return nil, fmt.Errorf("create arena challenge: at least one round is required")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin create arena challenge: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	created, err := createArenaBattle(ctx, tx, battle)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rounds {
+		rounds[i].BattleID = created.ID
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO arena_rounds (battle_id, round_number, round_type, deadline)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, created_at`,
+			rounds[i].BattleID, rounds[i].RoundNumber, rounds[i].RoundType, rounds[i].Deadline,
+		).Scan(&rounds[i].ID, &rounds[i].CreatedAt); err != nil {
+			return nil, fmt.Errorf("create arena round %d: %w", rounds[i].RoundNumber, err)
+		}
+	}
+	fullBattle, err := loadArenaBattleEvent(ctx, tx, created.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load arena challenge event: %w", err)
+	}
+	fullBattle.Rounds = rounds
+	if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.ChallengeCreated, arenaevents.ChallengePayload(fullBattle)); err != nil {
+		return nil, fmt.Errorf("enqueue arena challenge: %w", err)
+	}
+	firstRound, err := loadArenaRoundEvent(ctx, tx, created.ID, 1)
+	if err != nil {
+		return nil, fmt.Errorf("load first arena round event: %w", err)
+	}
+	if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.RoundOpened, arenaevents.RoundPayload(fullBattle, firstRound)); err != nil {
+		return nil, fmt.Errorf("enqueue first arena round: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create arena challenge: %w", err)
+	}
+	return fullBattle, nil
 }
 
 // GetBattle returns a battle by ID with joined agent and creator names.
@@ -167,6 +259,10 @@ func (r *ArenaRepo) UpdateBattleStatus(ctx context.Context, id string, status mo
 		return fmt.Errorf("begin arena status update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var previousStatus models.ArenaStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM arena_battles WHERE id = $1 FOR UPDATE`, id).Scan(&previousStatus); err != nil {
+		return fmt.Errorf("lock arena status update: %w", err)
+	}
 
 	if status == models.ArenaStatusCompleted {
 		result, updateErr := tx.Exec(ctx, `
@@ -181,6 +277,15 @@ func (r *ArenaRepo) UpdateBattleStatus(ctx context.Context, id string, status mo
 		}
 		if err := settleArenaStakeTx(ctx, tx, id, winnerID); err != nil {
 			return fmt.Errorf("settle arena battle stake: %w", err)
+		}
+		if previousStatus != models.ArenaStatusCompleted {
+			battle, err := loadArenaBattleEvent(ctx, tx, id)
+			if err != nil {
+				return fmt.Errorf("load status-completed battle payload: %w", err)
+			}
+			if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.BattleCompleted, arenaevents.CompletedPayload(battle)); err != nil {
+				return fmt.Errorf("enqueue status-completed battle: %w", err)
+			}
 		}
 	} else {
 		result, updateErr := tx.Exec(ctx, `
@@ -306,13 +411,22 @@ func settleArenaStakeTx(ctx context.Context, tx pgx.Tx, battleID string, winnerI
 
 // CreateRound inserts a new round for a battle.
 func (r *ArenaRepo) CreateRound(ctx context.Context, round *models.ArenaRound) error {
-	_, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin create arena round: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `
 		INSERT INTO arena_rounds (battle_id, round_number, round_type, deadline)
-		VALUES ($1, $2, $3, $4)`,
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at`,
 		round.BattleID, round.RoundNumber, round.RoundType, round.Deadline,
-	)
+	).Scan(&round.ID, &round.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create arena round: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create arena round: %w", err)
 	}
 	return nil
 }
@@ -440,6 +554,28 @@ func (r *ArenaRepo) SubmitArgument(ctx context.Context, battleID string, roundNu
 				return 0, fmt.Errorf("advance round: %w", err)
 			}
 			openedRound = roundNumber + 1
+		}
+	}
+	if openedRound > 0 {
+		battle := &models.ArenaBattle{ID: battleID, AgentAID: agentAID, AgentBID: agentBID, CurrentRound: openedRound}
+		if err := tx.QueryRow(ctx, `
+			SELECT topic, word_limit, COALESCE(rules, '')
+			FROM arena_battles WHERE id = $1`, battleID).Scan(
+			&battle.Topic, &battle.WordLimit, &battle.Rules,
+		); err != nil {
+			return 0, fmt.Errorf("load opened arena round battle: %w", err)
+		}
+		var opened models.ArenaRound
+		if err := tx.QueryRow(ctx, `
+			SELECT id, battle_id, round_number, round_type, deadline, created_at
+			FROM arena_rounds WHERE battle_id = $1 AND round_number = $2`, battleID, openedRound).Scan(
+			&opened.ID, &opened.BattleID, &opened.RoundNumber, &opened.RoundType,
+			&opened.Deadline, &opened.CreatedAt,
+		); err != nil {
+			return 0, fmt.Errorf("load opened arena round: %w", err)
+		}
+		if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.RoundOpened, arenaevents.RoundPayload(battle, &opened)); err != nil {
+			return 0, fmt.Errorf("enqueue opened arena round: %w", err)
 		}
 	}
 
@@ -588,6 +724,7 @@ func (r *ArenaRepo) CastVote(ctx context.Context, vote *models.ArenaVote) error 
 		return fmt.Errorf("check battle completion: %w", err)
 	}
 
+	var completedBattle *models.ArenaBattle
 	if completedRounds >= totalRounds {
 		// Determine overall winner
 		var agentAWins, agentBWins int
@@ -619,6 +756,23 @@ func (r *ArenaRepo) CastVote(ctx context.Context, vote *models.ArenaVote) error 
 		}
 		if err := settleArenaStakeTx(ctx, tx, vote.BattleID, overallWinner); err != nil {
 			return fmt.Errorf("settle completed battle stake: %w", err)
+		}
+		completedBattle = &models.ArenaBattle{ID: vote.BattleID}
+		if err := tx.QueryRow(ctx, `
+			SELECT topic, status, agent_a_id, agent_b_id, winner_id, voter_count,
+			       total_rounds, completed_at, trust_stake, settled_stake, stake_settled_at
+			FROM arena_battles WHERE id = $1`, vote.BattleID).Scan(
+			&completedBattle.Topic, &completedBattle.Status,
+			&completedBattle.AgentAID, &completedBattle.AgentBID,
+			&completedBattle.WinnerID, &completedBattle.VoterCount,
+			&completedBattle.TotalRounds, &completedBattle.CompletedAt,
+			&completedBattle.TrustStake, &completedBattle.SettledStake,
+			&completedBattle.StakeSettledAt,
+		); err != nil {
+			return fmt.Errorf("load completed arena battle payload: %w", err)
+		}
+		if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.BattleCompleted, arenaevents.CompletedPayload(completedBattle)); err != nil {
+			return fmt.Errorf("enqueue completed arena battle: %w", err)
 		}
 	}
 
@@ -784,6 +938,28 @@ func (r *ArenaRepo) ProcessExpiredRounds(ctx context.Context, now time.Time, lim
 				UPDATE arena_battles SET status = 'active', current_round = $2 WHERE id = $1`,
 				c.battleID, transition.OpenedRound); err != nil {
 				return nil, fmt.Errorf("advance expired arena battle: %w", err)
+			}
+		}
+		if transition.OpenedRound > 0 {
+			battle, err := loadArenaBattleEvent(ctx, tx, c.battleID)
+			if err != nil {
+				return nil, fmt.Errorf("load deadline-opened battle payload: %w", err)
+			}
+			opened, err := loadArenaRoundEvent(ctx, tx, c.battleID, transition.OpenedRound)
+			if err != nil {
+				return nil, fmt.Errorf("load deadline-opened round payload: %w", err)
+			}
+			if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.RoundOpened, arenaevents.RoundPayload(battle, opened)); err != nil {
+				return nil, fmt.Errorf("enqueue deadline-opened round: %w", err)
+			}
+		}
+		if transition.Completed {
+			battle, err := loadArenaBattleEvent(ctx, tx, c.battleID)
+			if err != nil {
+				return nil, fmt.Errorf("load deadline-completed battle payload: %w", err)
+			}
+			if _, err := enqueueWebhookEvent(ctx, tx, arenaevents.BattleCompleted, arenaevents.CompletedPayload(battle)); err != nil {
+				return nil, fmt.Errorf("enqueue deadline-completed battle: %w", err)
 			}
 		}
 		transitions = append(transitions, transition)

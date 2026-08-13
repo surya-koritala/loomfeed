@@ -475,7 +475,13 @@ const postJoinSelectWithTotal = `
 // Create inserts a new post. Defaults post_type to "text" if empty.
 // Also atomically increments the author's post_count on the participants table.
 func (r *PostRepo) Create(ctx context.Context, p *models.Post) (*models.Post, error) {
-	return createPost(ctx, r.pool, p)
+	var result *models.Post
+	err := database.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		created, err := createPost(ctx, tx, p)
+		result = created
+		return err
+	})
+	return result, err
 }
 
 // CreateWithProvenance creates a post, its provenance row, and the durable
@@ -577,6 +583,16 @@ func createPost(ctx context.Context, db database.DBTX, p *models.Post) (*models.
 	if len(resultMetaBytes) > 0 {
 		result.Metadata = make(map[string]any)
 		_ = json.Unmarshal(resultMetaBytes, &result.Metadata)
+	}
+	if !result.Quarantined {
+		if _, err := enqueueWebhookEvent(ctx, db, "post.created", map[string]any{
+			"post_id": result.ID, "community_id": result.CommunityID,
+			"author_id": result.AuthorID, "author_type": result.AuthorType,
+			"title": result.Title, "post_type": result.PostType,
+			"tags": result.Tags, "created_at": result.CreatedAt,
+		}); err != nil {
+			return nil, fmt.Errorf("enqueue post.created: %w", err)
+		}
 	}
 	return &result, nil
 }
@@ -745,6 +761,14 @@ func (r *PostRepo) PublishQuarantined(ctx context.Context, postID string) (*mode
 	if err != nil {
 		return nil, fmt.Errorf("read published post: %w", err)
 	}
+	if _, err := enqueueWebhookEvent(ctx, tx, "post.created", map[string]any{
+		"post_id": published.ID, "community_id": published.CommunityID,
+		"author_id": published.AuthorID, "author_type": published.AuthorType,
+		"title": published.Title, "post_type": published.PostType,
+		"tags": published.Tags, "created_at": published.CreatedAt,
+	}); err != nil {
+		return nil, fmt.Errorf("enqueue published post.created: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit published post: %w", err)
 	}
@@ -770,7 +794,8 @@ func (r *PostRepo) CreateWithCrosspost(ctx context.Context, p *models.Post) (*mo
 
 	var result models.Post
 	var resultMetaBytes []byte
-	err = r.pool.QueryRow(ctx, `
+	err = database.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
 		WITH inserted AS (
 			INSERT INTO posts
 			  (community_id, author_id, author_type, title, body, url, post_type,
@@ -788,29 +813,44 @@ func (r *PostRepo) CreateWithCrosspost(ctx context.Context, p *models.Post) (*mo
 			WHERE id = $2
 		)
 		SELECT * FROM inserted`,
-		p.CommunityID,
-		p.AuthorID,
-		p.AuthorType,
-		p.Title,
-		p.Body,
-		p.URL,
-		p.PostType,
-		metadataJSON,
-		p.ProvenanceID,
-		p.ConfidenceScore,
-		p.Tags,
-		p.CrosspostedFrom,
-		p.Quarantined,
-	).Scan(
-		&result.ID, &result.CommunityID, &result.AuthorID, &result.AuthorType,
-		&result.Title, &result.Body, &result.URL,
-		&result.PostType, &result.ProvenanceID, &result.ConfidenceScore,
-		&result.VoteScore, &result.CommentCount, &result.Tags, &resultMetaBytes,
-		&result.Quarantined, &result.CreatedAt, &result.UpdatedAt,
-		&result.CrosspostedFrom,
-	)
+			p.CommunityID,
+			p.AuthorID,
+			p.AuthorType,
+			p.Title,
+			p.Body,
+			p.URL,
+			p.PostType,
+			metadataJSON,
+			p.ProvenanceID,
+			p.ConfidenceScore,
+			p.Tags,
+			p.CrosspostedFrom,
+			p.Quarantined,
+		).Scan(
+			&result.ID, &result.CommunityID, &result.AuthorID, &result.AuthorType,
+			&result.Title, &result.Body, &result.URL,
+			&result.PostType, &result.ProvenanceID, &result.ConfidenceScore,
+			&result.VoteScore, &result.CommentCount, &result.Tags, &resultMetaBytes,
+			&result.Quarantined, &result.CreatedAt, &result.UpdatedAt,
+			&result.CrosspostedFrom,
+		)
+		if err != nil {
+			return fmt.Errorf("insert crosspost: %w", err)
+		}
+		if !result.Quarantined {
+			if _, err := enqueueWebhookEvent(ctx, tx, "post.created", map[string]any{
+				"post_id": result.ID, "community_id": result.CommunityID,
+				"author_id": result.AuthorID, "author_type": result.AuthorType,
+				"title": result.Title, "post_type": result.PostType,
+				"tags": result.Tags, "created_at": result.CreatedAt,
+			}); err != nil {
+				return fmt.Errorf("enqueue crosspost post.created: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("insert crosspost: %w", err)
+		return nil, err
 	}
 	if len(resultMetaBytes) > 0 {
 		result.Metadata = make(map[string]any)
@@ -1108,10 +1148,15 @@ func (r *PostRepo) SetQuestionStatusIfCurrent(ctx context.Context, postID, curre
 // question was public at the mutation's commit boundary for downstream
 // reputation and webhook events. The join prevents accepting a comment from a
 // different post or a deleted comment.
-func (r *PostRepo) AcceptAnswer(ctx context.Context, postID, commentID string) (string, bool, error) {
+func (r *PostRepo) AcceptAnswer(ctx context.Context, postID, commentID, acceptedBy string) (string, bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("begin accept answer: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var answerAuthorID string
 	var public bool
-	err := r.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH answer AS MATERIALIZED (
 			SELECT id, author_id
 			FROM comments
@@ -1128,7 +1173,21 @@ func (r *PostRepo) AcceptAnswer(ctx context.Context, postID, commentID string) (
 		  AND p.deleted_at IS NULL
 		RETURNING c.author_id, NOT p.quarantined`,
 		postID, commentID, string(models.QuestionStatusAnswered)).Scan(&answerAuthorID, &public)
-	return answerAuthorID, public, err
+	if err != nil {
+		return "", false, err
+	}
+	if public {
+		if _, err := enqueueWebhookEvent(ctx, tx, "answer.accepted", map[string]any{
+			"post_id": postID, "comment_id": commentID,
+			"answer_author_id": answerAuthorID, "accepted_by": acceptedBy,
+		}); err != nil {
+			return "", false, fmt.Errorf("enqueue answer.accepted: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", false, fmt.Errorf("commit accept answer: %w", err)
+	}
+	return answerAuthorID, public, nil
 }
 
 // ListBySubscriptions returns paginated posts from communities the participant is subscribed to.

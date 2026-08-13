@@ -128,7 +128,7 @@ func main() {
 		}
 	}
 	defer hub.Close()
-	routes.Register(mux, pool, cfg, redisCache, hub)
+	routes.Register(mux, pool, cfg, redisCache, hub, ctx)
 
 	// metrics.Middleware is innermost (closest to the mux) so the
 	// captured status code is what the handler wrote, not anything

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/surya-koritala/loomfeed/internal/arenaevents"
 	"github.com/surya-koritala/loomfeed/internal/auth"
 	"github.com/surya-koritala/loomfeed/internal/config"
 	"github.com/surya-koritala/loomfeed/internal/database"
@@ -22,7 +23,7 @@ import (
 
 func TestWebhookTestRouteDeliversOnlyToSelectedOwnedHook(t *testing.T) {
 	pool := database.TestPool(t)
-	database.CleanupTables(t, pool, "webhook_deliveries", "webhooks", "api_keys", "agent_identities", "human_users", "participants")
+	database.CleanupTables(t, pool, "webhook_deliveries", "webhook_delivery_jobs", "webhook_outbox_events", "webhooks", "api_keys", "agent_identities", "human_users", "participants")
 	ctx := context.Background()
 
 	type capturedRequest struct {
@@ -197,6 +198,35 @@ func TestWebhookTestRouteDeliversOnlyToSelectedOwnedHook(t *testing.T) {
 	}
 	if deliveries[0].EventID != response.EventID || deliveries[0].EventType != webhook.EventWebhookTest || !deliveries[0].Success {
 		t.Fatalf("owned delivery=%+v", deliveries[0])
+	}
+	statusHook, err := hooks.Create(ctx, owner.ID, ownerReceiver.URL, "status-secret", []string{arenaevents.ChallengeCreated})
+	if err != nil {
+		t.Fatalf("create status webhook: %v", err)
+	}
+	queuedEventID, err := hooks.Enqueue(ctx, arenaevents.ChallengeCreated, map[string]any{"battle_id": "queued-status"})
+	if err != nil {
+		t.Fatalf("enqueue owner-visible status: %v", err)
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/webhooks/"+statusHook.ID+"/deliveries", nil)
+	statusRequest.Header.Set("Authorization", "Bearer "+ownerToken)
+	statusResult := httptest.NewRecorder()
+	mux.ServeHTTP(statusResult, statusRequest)
+	if statusResult.Code != http.StatusOK {
+		t.Fatalf("delivery status endpoint=%d body=%s", statusResult.Code, statusResult.Body.String())
+	}
+	var visibleStatuses []repository.WebhookDelivery
+	if err := json.Unmarshal(statusResult.Body.Bytes(), &visibleStatuses); err != nil {
+		t.Fatalf("decode owner-visible statuses: %v", err)
+	}
+	var queuedStatus *repository.WebhookDelivery
+	for i := range visibleStatuses {
+		if visibleStatuses[i].EventID == queuedEventID {
+			queuedStatus = &visibleStatuses[i]
+			break
+		}
+	}
+	if queuedStatus == nil || queuedStatus.Status != "pending" || queuedStatus.AttemptCount != 0 || queuedStatus.Terminal {
+		t.Fatalf("queued owner-visible status=%+v", queuedStatus)
 	}
 
 	foreignResult := callTest(foreignHook.ID)

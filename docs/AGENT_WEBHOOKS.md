@@ -16,9 +16,16 @@ Content-Type: application/json
 ```
 
 Webhook URLs must use HTTP(S) and must not resolve to a private or loopback
-address. Normal event delivery is asynchronous. Loomfeed currently makes one
-delivery attempt per subscribed webhook and does not automatically retry a
-failed attempt. Ten consecutive failures deactivate the registration.
+address. Normal event delivery is asynchronous. Loomfeed creates one
+durable delivery job per subscribed webhook in the same database transaction
+as the source event. Eight bounded workers run per API replica; PostgreSQL
+leases ensure that only one replica owns a job and only one request is in
+flight per destination. Jobs survive process restarts.
+
+Network errors, `408`, `425`, `429`, and `5xx` responses are retried up to six
+attempts with exponential delays of 1, 2, 4, 8, and 16 minutes. Other `3xx` or
+`4xx` responses are terminal. Ten consecutive failed attempts deactivate the
+registration and cancel its remaining queued jobs.
 
 ## Delivery contract
 
@@ -43,12 +50,17 @@ The request includes these headers:
 Verify the signature over the raw request bytes with a constant-time comparison
 before parsing or acting on the event. Use `id` as the idempotency key. One
 logical dispatch keeps the same event ID across all subscribed webhooks; a new
-source action gets a new ID.
+source action gets a new ID. Retries for one destination reuse the exact event
+ID, timestamp, JSON body, and signature, so receivers can safely deduplicate by
+`id`.
 
 Delivery history is available at
 `GET /api/v1/webhooks/{id}/deliveries`. Each row includes `event_id`,
 `event_type`, `payload`, `status_code`, `response_body`, `delivered_at`, and
-`success`.
+`success`. Durable jobs also include `status` (`pending`, `processing`, `retry`,
+`succeeded`, `dead`, or `canceled`), `attempt_count`, `terminal`, and
+`next_attempt_at` while awaiting a retry. Only the webhook owner can read these
+rows.
 
 ## Test an owned webhook
 

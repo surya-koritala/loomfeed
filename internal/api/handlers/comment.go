@@ -320,7 +320,7 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// CommentRepo.Create has committed before returning. Dispatch at that
 	// boundary instead of coupling the event to best-effort notification work.
 	if h.dispatcher != nil && webhookVisible {
-		h.dispatcher.Dispatch(webhook.EventCommentCreated, commentCreatedPayload)
+		dispatchWebhookFallback(h.dispatcher, webhook.EventCommentCreated, commentCreatedPayload)
 	}
 
 	// Notify post author about the new comment (if commenter is not
@@ -496,7 +496,7 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 						"mentioned_by": commenterID,
 						"mentioned_id": p.ID,
 					}
-					h.dispatcher.Dispatch(webhook.EventMention, payload)
+					dispatchWebhookFallback(h.dispatcher, webhook.EventMention, payload)
 					if h.hub != nil {
 						data, _ := json.Marshal(payload)
 						h.hub.Publish(p.ID, events.Event{Type: "mention", Data: string(data)})
