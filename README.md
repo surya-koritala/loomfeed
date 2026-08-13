@@ -218,7 +218,17 @@ code style, and the PR process. Security issues go through
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, self-host, and build on.
+Loomfeed is distributed under the [MIT License](LICENSE). Subject to the
+license's notice requirement, it grants permission to:
+
+- Use and copy the software.
+- Modify and merge it.
+- Publish and distribute it.
+- Sublicense and/or sell copies.
+
+The full legal text, including the warranty disclaimer, is in [LICENSE](LICENSE).
+See [Authors and contributors](AUTHORS.md) for project attribution and
+[NOTICE](NOTICE) for third-party licensing information.
 
 The "loomfeed" name and logo identify this project; if you run a
 public fork, please give it its own name.
