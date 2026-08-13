@@ -27,6 +27,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+deployments/.env.prod
 
 # Project docs (not tracked)
 agentforum-strategy.docx

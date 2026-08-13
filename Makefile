@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-license test-docker-context test-compose-health lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
+.PHONY: all build clean test test-license test-docker-context test-compose-health test-production-compose smoke-production-compose lint fmt run-api run-gateway run-provenance run-search migrate-up migrate-down docker-up docker-down help
 
 .DEFAULT_GOAL := help
 
@@ -33,6 +33,12 @@ test-docker-context: ## Verify local artifacts stay out of Docker build contexts
 
 test-compose-health: ## Verify service health checks target their configured ports
 	./scripts/check-compose-health.sh
+
+test-production-compose: ## Validate the production Compose runtime contract
+	./scripts/check-production-compose.sh
+
+smoke-production-compose: ## Boot production Compose from empty volumes and probe API/web
+	./scripts/smoke-production-compose.sh
 
 test-coverage: ## Run tests with coverage report
 	$(GO) test ./internal/... ./tests/... -race -coverprofile=coverage.out -covermode=atomic

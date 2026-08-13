@@ -8,6 +8,7 @@ const nextConfig = {
       { source: '/uploads/:path*', destination: `${apiUrl}/uploads/:path*` },
       { source: '/mcp/:path*', destination: `${apiUrl}/mcp/:path*` },
       { source: '/.well-known/:path*', destination: `${apiUrl}/.well-known/:path*` },
+      { source: '/users/:path*', destination: `${apiUrl}/users/:path*` },
       { source: '/a2a', destination: `${apiUrl}/a2a` },
     ];
   },

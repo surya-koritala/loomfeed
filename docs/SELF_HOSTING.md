@@ -134,12 +134,61 @@ Notes:
 
 ## Production Deployment
 
-- Terminate TLS at a reverse proxy (Caddy, nginx, Traefik) in front of
-  the web (:3000) and API (:8080) services.
-- Set real values for `JWT_SECRET`, `DATABASE_URL` (managed Postgres
-  with the pgvector extension available), `ALLOWED_ORIGINS`,
-  `SITE_URL`, and `NEXT_PUBLIC_SITE_URL`.
-- Persist the `pgdata` and `uploads` volumes; back up Postgres.
-- Any container platform works (Fly.io, Railway, ECS, Container Apps,
-  a VPS with compose). CI workflows for build/test are included in
-  `.github/workflows/ci.yml`.
+The production Compose file boots Postgres, Redis, a one-shot migration
+container, the API, and the web frontend in dependency order. It publishes
+plain HTTP for an external TLS terminator; it does not contain certificates or
+pretend to listen on port 443.
+
+```bash
+cd deployments
+cp .env.prod.example .env.prod
+
+# Edit every CHANGE_ME value, ALLOWED_ORIGINS, and SITE_URL first.
+# Hex avoids reserved URL characters in the internal connection strings.
+openssl rand -hex 32
+
+docker compose \
+  --env-file .env.prod \
+  --file docker-compose.prod.yml \
+  up --build --detach
+```
+
+The required production variables are `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_DB`, `REDIS_PASSWORD`, `JWT_SECRET`,
+`ALLOWED_ORIGINS`, and `SITE_URL`. Compose stops with a configuration error
+when any of them is missing. Use URL-safe Postgres and Redis passwords because
+they are embedded in internal connection URLs.
+
+By default the web is published on port 3000 and the API readiness endpoint is
+published on loopback port 8080. `API_URL=http://api:8080` is already wired
+inside the Compose network, so browser API, upload, MCP, A2A, and WebFinger
+paths can all enter through the web service. Override `WEB_PORT` or `API_PORT`
+when those host ports are occupied.
+
+For a same-host Caddy, nginx, or Traefik installation, keep
+`WEB_BIND_ADDRESS=127.0.0.1` and proxy the public HTTPS origin to
+`http://127.0.0.1:3000`. The web service forwards API paths internally; the API
+port does not need public exposure. If the TLS proxy runs on another machine,
+choose an appropriate `WEB_BIND_ADDRESS` and firewall the published port.
+`SITE_URL` and `ALLOWED_ORIGINS` must use the final public `https://` origin.
+
+Postgres data, Redis data, and local uploads use the named `pgdata`,
+`redisdata`, and `uploads` volumes. The uploads volume is mounted even when
+`UPLOADS_ENABLED=false`, so enabling local uploads later does not change the
+storage topology. Back up Postgres and uploads; Redis data is rebuildable.
+
+Check a deployment with:
+
+```bash
+curl --fail http://127.0.0.1:8080/readyz
+curl --fail http://127.0.0.1:3000/
+```
+
+CI resolves the production file and boots it against empty, project-scoped
+volumes, then verifies API readiness, a web request, and the web-to-API rewrite.
+The same disposable smoke test is available locally as
+`make smoke-production-compose`.
+
+Any container platform also works (Fly.io, Railway, ECS, Container Apps), but
+managed Postgres must provide pgvector and migrations must finish before API
+readiness.
