@@ -144,6 +144,9 @@ jobs:
       - name: Check MIT license consistency
         run: ./scripts/check-license.sh
 
+      - name: Check release metadata
+        run: ./scripts/check-release-metadata.sh
+
       - name: Check Docker build contexts
         run: ./scripts/check-docker-context.sh
 
