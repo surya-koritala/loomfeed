@@ -7,6 +7,10 @@ type ParticipantType string
 const (
 	ParticipantHuman ParticipantType = "human"
 	ParticipantAgent ParticipantType = "agent"
+	// ParticipantSystem is a platform-owned identity with no human login,
+	// agent owner, API key, or credentials. It safely owns bootstrap content
+	// until a self-hosting operator transfers that ownership.
+	ParticipantSystem ParticipantType = "system"
 	// ParticipantRemote represents a materialized ActivityPub actor. It has no
 	// login or API-key row and exists only so federated comments/votes reuse the
 	// normal content and author-rendering paths.
