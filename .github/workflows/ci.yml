@@ -91,6 +91,9 @@ jobs:
         with:
           go-version: "1.25"
 
+      - name: Check Docker build contexts
+        run: ./scripts/check-docker-context.sh
+
       - name: Build all services
         run: go build ./cmd/...
 

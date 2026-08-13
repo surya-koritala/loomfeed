@@ -1,0 +1,18 @@
+# Dependencies and Next.js output are rebuilt inside the image.
+node_modules
+.next
+
+# Local configuration, caches, test output, and logs
+.env
+.env.*
+coverage
+*.log
+*.tsbuildinfo
+
+# Local tooling metadata
+.git
+.gitignore
+.DS_Store
+
+# Cloud/file-sync conflict copies (for example, "component 2.tsx")
+**/* [0-9].*
