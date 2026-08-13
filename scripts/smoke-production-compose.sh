@@ -4,6 +4,7 @@ set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 compose_file="$project_dir/deployments/docker-compose.prod.yml"
 project_name=loomfeed-prod-smoke-$(date +%s)-$$
+response_file=$(mktemp)
 
 export POSTGRES_USER=${POSTGRES_USER:-loomfeed}
 export POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-prod_smoke_password}
@@ -18,6 +19,8 @@ export ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://127.0.0.1:$WEB_PORT}
 export SITE_URL=${SITE_URL:-http://127.0.0.1:$WEB_PORT}
 export UPLOADS_ENABLED=${UPLOADS_ENABLED:-true}
 export FEDERATION_ENABLED=true
+export BYOK_ENABLED=false
+export BYOK_KEK=
 
 compose() {
     docker compose --project-name "$project_name" --file "$compose_file" "$@"
@@ -31,6 +34,7 @@ cleanup() {
         compose logs --no-color >&2 || true
     fi
     compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || true
+    rm -f "$response_file"
     exit "$exit_code"
 }
 trap cleanup EXIT HUP INT TERM
@@ -57,6 +61,14 @@ compose up --build --detach
 wait_for_url "API readiness" "http://127.0.0.1:$API_PORT/readyz"
 wait_for_url "web frontend" "http://127.0.0.1:$WEB_PORT/"
 wait_for_url "web-to-API rewrite" "http://127.0.0.1:$WEB_PORT/api/v1/config"
+runtime_config=$(curl --fail --silent --show-error \
+    "http://127.0.0.1:$WEB_PORT/api/v1/config")
+printf '%s' "$runtime_config" | jq -e '.byok_enabled == false' >/dev/null
+if compose run --rm --no-deps \
+    --env BYOK_ENABLED=true --env BYOK_KEK=not-base64 api >/dev/null 2>&1; then
+    echo "API accepted malformed BYOK_KEK while BYOK was explicitly enabled" >&2
+    exit 1
+fi
 
 system_identity_state=$(compose exec --no-TTY postgres psql \
     --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only \
@@ -134,6 +146,19 @@ registration=$(curl --fail --silent --show-error \
     "http://127.0.0.1:$WEB_PORT/api/v1/auth/register")
 access_token=$(printf '%s' "$registration" | jq -er '.access_token')
 participant_id=$(printf '%s' "$registration" | jq -er '.participant.id')
+
+byok_status=$(curl --silent --show-error --output "$response_file" \
+    --write-out '%{http_code}' \
+    --header 'Content-Type: application/json' \
+    --header "Authorization: Bearer $access_token" \
+    --data '{"display_name":"Unavailable BYOK","provider":"openai","model":"test","api_key":"secret"}' \
+    "http://127.0.0.1:$WEB_PORT/api/v1/byok-agents")
+if [ "$byok_status" != "503" ]; then
+    echo "expected disabled BYOK create to return 503; got $byok_status" >&2
+    cat "$response_file" >&2
+    exit 1
+fi
+jq -e '.error == "BYOK agents are not available on this server"' "$response_file" >/dev/null
 
 post_body=$(jq -n --arg community_id "$community_id" '{
     community_id: $community_id,

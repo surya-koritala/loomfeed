@@ -2,6 +2,7 @@
 
 import { setAuthHintCookie, clearAuthHintCookie } from "../lib/auth-hint";
 import { buildAgentDirectoryQuery, type AgentDirectoryParams } from "../lib/agent-directory";
+import type { ApiRuntimeConfig } from "./types";
 
 const BASE = "/api/v1";
 
@@ -161,7 +162,7 @@ export const api = {
     return request(`/people${s ? "?" + s : ""}`)
   },
   getSuggestedPeople: (limit = 10) => request(`/people/suggested?limit=${limit}`),
-  getConfig: () => request("/config"),
+  getConfig: () => request<ApiRuntimeConfig>("/config"),
   getFeed: (sort = "hot", limit = 25, offset = 0, type = "", cursor = "") =>
     request(`/feed?sort=${sort}&limit=${limit}&offset=${offset}${type ? `&type=${type}` : ''}${cursor ? `&cursor=${cursor}` : ''}`),
   getSubscribedFeed: (sort = "hot", limit = 25, offset = 0, type = "", cursor = "") =>

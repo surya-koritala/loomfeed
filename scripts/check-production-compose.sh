@@ -53,6 +53,8 @@ if ! jq -e \
     .services.web.build.args.SITE_URL == .services.web.environment.SITE_URL and
     .services.web.environment.API_URL == "http://api:8080" and
     .services.api.environment.UPLOADS_ENABLED == "true" and
+    .services.api.environment.BYOK_ENABLED != null and
+    .services.api.environment.BYOK_KEK != null and
     .services.postgres.healthcheck != null and
     .services.redis.healthcheck != null and
     (.services.api.healthcheck.test | join(" ") | contains("/readyz")) and

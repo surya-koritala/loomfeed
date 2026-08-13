@@ -150,7 +150,8 @@ ones that matter most:
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` | No | `SMTP_PORT=587` | Email via SMTP. `SMTP_FROM` is required when `SMTP_HOST` is set; username and password are optional but must be provided together. |
 | `ACS_CONNECTION_STRING` / `ACS_EMAIL_DOMAIN` | No | — | Alternative email backend via Azure Communication Services. Used when SMTP is not configured. |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | No | — | Web push notifications. |
-| `BYOK_KEK` | No | — | Base64 32-byte key encrypting user-supplied LLM keys at rest. |
+| `BYOK_ENABLED` | No | — | Set `true` to enable BYOK agents and require a valid `BYOK_KEK` at API startup. Set `false` to disable the feature even when a key is present. |
+| `BYOK_KEK` | No | — | Base64 32-byte key encrypting user-supplied LLM keys at rest. A valid key implicitly enables BYOK when `BYOK_ENABLED` is unset for backwards compatibility. Generate with `openssl rand -base64 32`. |
 | `NEXT_PUBLIC_CLARITY_PROJECT_ID` / `NEXT_PUBLIC_GOOGLE_ADS_ID` / `NEXT_PUBLIC_ADSENSE_CLIENT` | No | — | Analytics/ads. Empty (default) loads no third-party scripts. |
 
 Notes:

@@ -9,8 +9,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
-	"sync"
 )
 
 // BYOKVault seals/opens BYOK API keys with AES-256-GCM using a key loaded
@@ -19,13 +17,9 @@ type BYOKVault struct {
 	gcm cipher.AEAD
 }
 
-var (
-	defaultVault   *BYOKVault
-	defaultVaultMu sync.Mutex
-)
-
-// NewBYOKVault builds a vault directly from a 32-byte key. Mostly used by
-// tests; production code should use DefaultBYOKVault which loads from env.
+// NewBYOKVault builds a vault directly from a 32-byte key. Callers using the
+// operator-facing configuration should prefer NewBYOKVaultFromBase64 after
+// validating the feature flag and key together.
 func NewBYOKVault(key []byte) (*BYOKVault, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("key must be 32 bytes, got %d", len(key))
@@ -41,35 +35,20 @@ func NewBYOKVault(key []byte) (*BYOKVault, error) {
 	return &BYOKVault{gcm: gcm}, nil
 }
 
-// DefaultBYOKVault returns a process-wide vault, initialized lazily from the
-// BYOK_KEK env var. Returns an error if the env var is missing or malformed.
-func DefaultBYOKVault() (*BYOKVault, error) {
-	defaultVaultMu.Lock()
-	defer defaultVaultMu.Unlock()
-	if defaultVault != nil {
-		return defaultVault, nil
-	}
-	raw := os.Getenv("BYOK_KEK")
-	if raw == "" {
+// NewBYOKVaultFromBase64 constructs a vault from the operator-facing
+// BYOK_KEK representation without reading process-global environment state.
+func NewBYOKVaultFromBase64(encoded string) (*BYOKVault, error) {
+	if encoded == "" {
 		return nil, errors.New("BYOK_KEK env var not set")
 	}
-	key, err := base64.StdEncoding.DecodeString(raw)
+	key, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("BYOK_KEK is not valid base64: %w", err)
 	}
 	if len(key) != 32 {
 		return nil, fmt.Errorf("BYOK_KEK must decode to 32 bytes, got %d", len(key))
 	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	defaultVault = &BYOKVault{gcm: gcm}
-	return defaultVault, nil
+	return NewBYOKVault(key)
 }
 
 // Seal encrypts plaintext and returns a base64-encoded blob that packs

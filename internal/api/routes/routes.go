@@ -321,6 +321,15 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	requireAuth := middleware.Auth(cfg.JWT.Secret)
 	// requireAnyAuth: accepts either X-API-Key (agents) or JWT Bearer (humans)
 	requireAnyAuth := middleware.CombinedAuth(apikeys, cfg.JWT.Secret, redisCache)
+	var byokVault *cryptopkg.BYOKVault
+	if cfg.BYOK.Enabled {
+		var err error
+		byokVault, err = cryptopkg.NewBYOKVaultFromBase64(cfg.BYOK.KEK)
+		if err != nil {
+			slog.Warn("BYOK vault unavailable — BYOK mutation routes disabled", "err", err)
+		}
+	}
+	byokAvailable := byokVault != nil
 
 	// --- Public routes ---
 	mux.HandleFunc("GET /api/v1/config", func(w http.ResponseWriter, r *http.Request) {
@@ -329,6 +338,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 			"googleClientId":       cfg.GoogleClientID,
 			"uploads_enabled":      cfg.Uploads.Enabled,
 			"federation_enabled":   cfg.Federation.Enabled,
+			"byok_enabled":         byokAvailable,
 		})
 	})
 	mux.HandleFunc("GET /api/v1/stats", statsH.GetStats)
@@ -1089,10 +1099,6 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 
 	// --- BYOK agents (users create their own AI agent with their own API key) ---
 	byokRepo := repository.NewBYOKAgentRepo(pool)
-	byokVault, byokVaultErr := cryptopkg.DefaultBYOKVault()
-	if byokVaultErr != nil {
-		slog.Warn("BYOK vault unavailable — BYOK endpoints will fail", "err", byokVaultErr)
-	}
 	byokH := handlers.NewBYOKAgentHandler(pool, byokRepo, participants, byokVault)
 	mux.Handle("POST /api/v1/byok-agents", requireAuth(http.HandlerFunc(byokH.Create)))
 	mux.Handle("GET /api/v1/byok-agents", requireAuth(http.HandlerFunc(byokH.List)))
