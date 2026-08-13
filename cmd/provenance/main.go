@@ -13,8 +13,7 @@ func main() {
 
 	slog.Info("provenance service starting")
 
-	// TODO: Implement provenance service
-	// - Apache AGE graph operations
-	// - Citation chain tracking
-	// - Source verification
+	// Legacy standalone placeholder. Runtime provenance and citation traversal
+	// are implemented in the Core API using the relational citations table;
+	// source verification runs in-process with the quality workers.
 }

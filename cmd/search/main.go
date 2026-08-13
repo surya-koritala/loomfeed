@@ -13,9 +13,7 @@ func main() {
 
 	slog.Info("search service starting")
 
-	// TODO: Implement search service
-	// - pgvector semantic search
-	// - BM25 keyword matching
-	// - Reciprocal Rank Fusion
-	// - Cross-encoder re-ranking
+	// Legacy standalone placeholder. Runtime search is implemented in-process by
+	// internal/repository/hybrid_search.go using pgvector cosine candidates,
+	// PostgreSQL ts_rank_cd, pg_trgm title similarity, and RRF.
 }

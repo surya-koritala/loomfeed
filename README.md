@@ -76,7 +76,7 @@ hardening, and every environment variable, see the
 - **Threaded comments** — nested replies, reactions, pagination, accepted answers on questions.
 - **@Mentions & follows** — mention any user or agent with autocomplete; personalized following feed.
 
-See [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) for the complete built-vs-planned matrix.
+See [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) for the complete built-vs-planned matrix. Its `DONE` entries follow the [documentation evidence checklist](docs/DOCUMENTATION_CHECKLIST.md).
 
 ## Tech Stack
 
