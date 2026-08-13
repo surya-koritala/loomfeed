@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/surya-koritala/loomfeed/internal/api"
 	"github.com/surya-koritala/loomfeed/internal/api/middleware"
@@ -14,13 +15,14 @@ import (
 
 // EventHandler handles SSE streaming endpoints.
 type EventHandler struct {
-	hub *events.Hub
-	cfg *config.Config
+	hub               *events.Hub
+	cfg               *config.Config
+	heartbeatInterval time.Duration
 }
 
 // NewEventHandler creates a new EventHandler.
 func NewEventHandler(hub *events.Hub, cfg *config.Config) *EventHandler {
-	return &EventHandler{hub: hub, cfg: cfg}
+	return &EventHandler{hub: hub, cfg: cfg, heartbeatInterval: 15 * time.Second}
 }
 
 // Stream handles GET /api/v1/events/stream
@@ -69,38 +71,8 @@ func (h *EventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use ResponseController for flushing (works through wrapped ResponseWriters)
-	rc := http.NewResponseController(w)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	// Send a connected event immediately
-	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"participant_id\":\"%s\"}\n\n", claims.ParticipantID)
-	_ = rc.Flush()
-
-	ch := h.hub.Subscribe(claims.ParticipantID)
-	defer h.hub.Unsubscribe(claims.ParticipantID, ch)
-
-	notify := r.Context().Done()
-
-	for {
-		select {
-		case event, ok := <-ch:
-			if !ok {
-				return
-			}
-			_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, event.Data)
-			if err != nil {
-				return
-			}
-			_ = rc.Flush()
-		case <-notify:
-			return
-		}
-	}
+	h.serveStream(w, r, claims.ParticipantID,
+		fmt.Sprintf(`{"participant_id":%q}`, claims.ParticipantID))
 }
 
 // StreamHealth is a simple endpoint to check if SSE is working without auth.
@@ -120,19 +92,31 @@ func (h *EventHandler) PostStream(w http.ResponseWriter, r *http.Request) {
 	}
 	key := "post:" + postID
 
+	h.serveStream(w, r, key, fmt.Sprintf(`{"post_id":%q}`, postID))
+}
+
+func (h *EventHandler) serveStream(w http.ResponseWriter, r *http.Request, key, connectedData string) {
+	// SSE is intentionally long-lived. Clear the per-request deadline inherited
+	// from http.Server.WriteTimeout while keeping the timeout for normal APIs.
 	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"post_id\":\"%s\"}\n\n", postID)
-	_ = rc.Flush()
+	if _, err := fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connectedData); err != nil {
+		return
+	}
+	if err := rc.Flush(); err != nil {
+		return
+	}
 
 	ch := h.hub.Subscribe(key)
 	defer h.hub.Unsubscribe(key, ch)
+	heartbeat := time.NewTicker(h.heartbeatInterval)
+	defer heartbeat.Stop()
 
-	notify := r.Context().Done()
 	for {
 		select {
 		case event, ok := <-ch:
@@ -143,9 +127,18 @@ func (h *EventHandler) PostStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
-			_ = rc.Flush()
-		case <-notify:
+			if err := rc.Flush(); err != nil {
+				return
+			}
+		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			if err := rc.Flush(); err != nil {
+				return
+			}
 		}
 	}
 }
