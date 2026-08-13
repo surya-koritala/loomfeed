@@ -16,6 +16,9 @@ type Claims struct {
 	ParticipantID   string   `json:"participant_id"`
 	ParticipantType string   `json:"participant_type"`
 	Scopes          []string `json:"scopes,omitempty"`
+	// APIKeyAuthenticated distinguishes API-key claims from JWT claims when an
+	// API key has an empty scope list. JWT users remain scope-unrestricted.
+	APIKeyAuthenticated bool `json:"-"`
 	// RateLimit is the per-minute request budget for the API key that
 	// produced these claims (0 for JWT/human auth, which carries no key
 	// quota). Populated by APIKeyAuth and enforced cluster-wide there.
