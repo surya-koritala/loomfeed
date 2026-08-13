@@ -29,6 +29,10 @@ type deliveryBackend interface {
 	Send(to, toName, subject, htmlBody, plainText string) error
 }
 
+type idempotentDeliveryBackend interface {
+	SendIdempotent(deliveryID string, firstSent time.Time, to, toName, subject, htmlBody, plainText string) error
+}
+
 // Sender exposes one email interface over the configured delivery backend.
 type Sender struct {
 	backend deliveryBackend
@@ -129,8 +133,43 @@ func (s *Sender) Send(to, toName, subject, htmlBody, plainText string) error {
 	return s.backend.Send(to, toName, subject, htmlBody, plainText)
 }
 
+// SendIdempotent supplies a stable delivery identity to backends that can
+// suppress or correlate retries. It falls back to Send for other backends.
+func (s *Sender) SendIdempotent(
+	deliveryID string,
+	firstSent time.Time,
+	to, toName, subject, htmlBody, plainText string,
+) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("email sender is not configured")
+	}
+	if strings.ContainsAny(deliveryID, "\r\n") {
+		return fmt.Errorf("email delivery ID must not contain line breaks")
+	}
+	if backend, ok := s.backend.(idempotentDeliveryBackend); ok {
+		return backend.SendIdempotent(deliveryID, firstSent, to, toName, subject, htmlBody, plainText)
+	}
+	return s.backend.Send(to, toName, subject, htmlBody, plainText)
+}
+
 // Send sends an email via ACS with HMAC-SHA256 auth.
 func (s *acsBackend) Send(to, toName, subject, htmlBody, plainText string) error {
+	return s.send("", time.Time{}, to, toName, subject, htmlBody, plainText)
+}
+
+func (s *acsBackend) SendIdempotent(
+	deliveryID string,
+	firstSent time.Time,
+	to, toName, subject, htmlBody, plainText string,
+) error {
+	return s.send(deliveryID, firstSent, to, toName, subject, htmlBody, plainText)
+}
+
+func (s *acsBackend) send(
+	deliveryID string,
+	firstSent time.Time,
+	to, toName, subject, htmlBody, plainText string,
+) error {
 	if s.endpoint == "" || len(s.key) == 0 {
 		slog.Warn("email: skipping send, no ACS credentials")
 		return nil
@@ -180,6 +219,11 @@ func (s *acsBackend) Send(to, toName, subject, htmlBody, plainText string) error
 	req.Header.Set("x-ms-content-sha256", bodyHashB64)
 	req.Header.Set("Authorization", fmt.Sprintf(
 		"HMAC-SHA256 SignedHeaders=x-ms-date;host;x-ms-content-sha256&Signature=%s", signature))
+	if deliveryID != "" {
+		req.Header.Set("Operation-Id", deliveryID)
+		req.Header.Set("Repeatability-Request-Id", deliveryID)
+		req.Header.Set("Repeatability-First-Sent", firstSent.UTC().Format(http.TimeFormat))
+	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -199,6 +243,18 @@ func (s *acsBackend) Send(to, toName, subject, htmlBody, plainText string) error
 
 // Send submits a multipart plain-text + HTML message over SMTP.
 func (s *smtpBackend) Send(to, toName, subject, htmlBody, plainText string) error {
+	return s.send("", to, toName, subject, htmlBody, plainText)
+}
+
+func (s *smtpBackend) SendIdempotent(
+	deliveryID string,
+	_ time.Time,
+	to, toName, subject, htmlBody, plainText string,
+) error {
+	return s.send(deliveryID, to, toName, subject, htmlBody, plainText)
+}
+
+func (s *smtpBackend) send(deliveryID, to, toName, subject, htmlBody, plainText string) error {
 	if s.host == "" || s.port == "" || s.from == "" {
 		return fmt.Errorf("SMTP sender is incomplete")
 	}
@@ -218,7 +274,15 @@ func (s *smtpBackend) Send(to, toName, subject, htmlBody, plainText string) erro
 		toAddress.Name = toName
 	}
 
-	message, err := buildSMTPMessage(*fromAddress, *toAddress, subject, plainText, htmlBody)
+	messageID := ""
+	if deliveryID != "" {
+		domain := "loomfeed.local"
+		if _, fromDomain, ok := strings.Cut(fromAddress.Address, "@"); ok && fromDomain != "" {
+			domain = fromDomain
+		}
+		messageID = fmt.Sprintf("<%s@%s>", deliveryID, domain)
+	}
+	message, err := buildSMTPMessage(*fromAddress, *toAddress, subject, plainText, htmlBody, messageID)
 	if err != nil {
 		return err
 	}
@@ -276,13 +340,16 @@ func (s *smtpBackend) Send(to, toName, subject, htmlBody, plainText string) erro
 	return nil
 }
 
-func buildSMTPMessage(from, to mail.Address, subject, plainText, htmlBody string) ([]byte, error) {
+func buildSMTPMessage(from, to mail.Address, subject, plainText, htmlBody string, messageID ...string) ([]byte, error) {
 	var body bytes.Buffer
 	boundary := multipart.NewWriter(&body)
 
 	_, _ = fmt.Fprintf(&body, "From: %s\r\n", from.String())
 	_, _ = fmt.Fprintf(&body, "To: %s\r\n", to.String())
 	_, _ = fmt.Fprintf(&body, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
+	if len(messageID) > 0 && messageID[0] != "" {
+		_, _ = fmt.Fprintf(&body, "Message-ID: %s\r\n", messageID[0])
+	}
 	_, _ = fmt.Fprint(&body, "MIME-Version: 1.0\r\n")
 	_, _ = fmt.Fprintf(&body, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary.Boundary())
 
