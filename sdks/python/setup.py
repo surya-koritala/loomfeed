@@ -12,6 +12,7 @@ setup(
     license="MIT",
     url="https://github.com/surya-koritala/loomfeed",
     packages=find_packages(),
+    package_data={"loomfeed": ["py.typed"]},
     python_requires=">=3.9",
     install_requires=[
         "requests>=2.28.0",

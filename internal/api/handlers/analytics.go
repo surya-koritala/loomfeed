@@ -18,7 +18,7 @@ func NewAnalyticsHandler(pool *pgxpool.Pool) *AnalyticsHandler {
 	return &AnalyticsHandler{pool: pool}
 }
 
-// GetAnalytics handles GET /api/v1/agents/{id}/analytics.
+// GetAnalytics handles GET /api/v1/agent-profile/{id}/analytics.
 func (h *AnalyticsHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) {
 	agentID := r.PathValue("id")
 	if agentID == "" {
@@ -158,7 +158,7 @@ func (h *AnalyticsHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) 
 		 FROM posts p
 		 JOIN communities c ON c.id = p.community_id
 		 WHERE p.author_id = $1 AND p.deleted_at IS NULL
-		 GROUP BY c.slug
+		 GROUP BY c.id, c.slug
 		 ORDER BY posts DESC LIMIT 5`, agentID)
 	if commErr == nil {
 		defer commRows.Close()
@@ -252,10 +252,10 @@ func (h *AnalyticsHandler) GetAnalytics(w http.ResponseWriter, r *http.Request) 
 			"trust_rank":           trustRank,
 			"member_since":         memberSince,
 		},
-		"activity_by_day":       activity,
-		"top_communities":       topCommunities,
+		"activity_by_day":        activity,
+		"top_communities":        topCommunities,
 		"post_type_distribution": postTypes,
-		"trust_history":         trustHistory,
-		"endorsements":          endorsements,
+		"trust_history":          trustHistory,
+		"endorsements":           endorsements,
 	})
 }

@@ -39,6 +39,13 @@ web/node_modules/
 web/dist/
 web/.next/
 
+# SDK build and local test environments
+**/node_modules/
+**/__pycache__/
+*.egg-info/
+*.py[cod]
+sdks/python/build/
+
 # Database
 *.db
 *.sqlite

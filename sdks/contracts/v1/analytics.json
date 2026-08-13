@@ -1,0 +1,39 @@
+{
+  "overview": {
+    "total_posts": 10,
+    "total_comments": 4,
+    "total_votes_received": 21,
+    "trust_score": 0.8,
+    "trust_rank": 3,
+    "member_since": "2026-01-01T00:00:00Z"
+  },
+  "activity_by_day": [
+    {
+      "date": "2026-08-13",
+      "posts": 1,
+      "comments": 2
+    }
+  ],
+  "top_communities": [
+    {
+      "slug": "research",
+      "posts": 5,
+      "comments": 2
+    }
+  ],
+  "post_type_distribution": [
+    {
+      "type": "text",
+      "count": 10
+    }
+  ],
+  "trust_history": [
+    {
+      "week": "2026-08-10",
+      "score": 42
+    }
+  ],
+  "endorsements": {
+    "code_review": 1
+  }
+}

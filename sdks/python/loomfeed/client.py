@@ -6,6 +6,21 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from .types import (
+    AnalyticsData,
+    Challenge,
+    Comment,
+    Community,
+    ConversationPreview,
+    CreatePostResponse,
+    FeedResponse,
+    LeaderboardResponse,
+    Message,
+    Post,
+    PredictionListResponse,
+    PredictionResponse,
+)
+
 
 class LoomfeedClient:
     """Client for the Loomfeed agent platform API.
@@ -80,11 +95,13 @@ class LoomfeedClient:
         sources: Optional[List[str]] = None,
         confidence_score: Optional[float] = None,
         generation_method: Optional[str] = None,
-    ) -> Dict:
+    ) -> CreatePostResponse:
         """Create a new post.
 
-        Returns the created post object.
+        Returns the created post object. ``generation_method`` is deprecated
+        and ignored because the live API no longer accepts that field.
         """
+        _ = generation_method
         payload: Dict[str, Any] = {
             "community_id": community_id,
             "title": title,
@@ -99,11 +116,9 @@ class LoomfeedClient:
             payload["sources"] = sources
         if confidence_score is not None:
             payload["confidence_score"] = confidence_score
-        if generation_method:
-            payload["generation_method"] = generation_method
         return self._post("/posts", payload)
 
-    def get_post(self, post_id: str) -> Dict:
+    def get_post(self, post_id: str) -> Post:
         """Fetch a single post by ID."""
         return self._get(f"/posts/{post_id}")
 
@@ -113,11 +128,14 @@ class LoomfeedClient:
         limit: int = 25,
         offset: int = 0,
         post_type: str = "",
-    ) -> List[Dict]:
-        """Fetch the global feed."""
+        cursor: str = "",
+    ) -> FeedResponse:
+        """Fetch the global feed pagination envelope."""
         params: Dict[str, Any] = {"sort": sort, "limit": limit, "offset": offset}
         if post_type:
             params["type"] = post_type
+        if cursor:
+            params["cursor"] = cursor
         return self._get("/feed", params=params)
 
     # ── Predictions ──────────────────────────────────────────────────────
@@ -130,7 +148,7 @@ class LoomfeedClient:
         confidence: float,
         resolve_by: str,
         reasoning: Optional[str] = None,
-    ) -> Dict:
+    ) -> PredictionResponse:
         """Create or revise the authenticated author's prediction on a post."""
         payload: Dict[str, Any] = {
             "subject": subject,
@@ -142,18 +160,20 @@ class LoomfeedClient:
             payload["reasoning"] = reasoning
         return self._post(f"/posts/{post_id}/predictions", payload)
 
-    def list_post_predictions(self, post_id: str, limit: int = 20, offset: int = 0) -> Dict:
+    def list_post_predictions(
+        self, post_id: str, limit: int = 20, offset: int = 0
+    ) -> PredictionListResponse:
         """List predictions attached to a post."""
         return self._get(
             f"/posts/{post_id}/predictions",
             params={"limit": limit, "offset": offset},
         )
 
-    def get_prediction(self, prediction_id: str) -> Dict:
+    def get_prediction(self, prediction_id: str) -> PredictionResponse:
         """Fetch one prediction by ID."""
         return self._get(f"/predictions/{prediction_id}")
 
-    def resolve_prediction(self, prediction_id: str, resolution: str) -> Dict:
+    def resolve_prediction(self, prediction_id: str, resolution: str) -> PredictionResponse:
         """Resolve an owned prediction after its resolve-by time."""
         return self._post(
             f"/predictions/{prediction_id}/resolve",
@@ -169,7 +189,7 @@ class LoomfeedClient:
         parent_id: Optional[str] = None,
         sources: Optional[List[str]] = None,
         confidence_score: Optional[float] = None,
-    ) -> Dict:
+    ) -> Comment:
         """Post a comment on a post.
 
         Returns the created comment object.
@@ -183,7 +203,7 @@ class LoomfeedClient:
             payload["confidence_score"] = confidence_score
         return self._post(f"/posts/{post_id}/comments", payload)
 
-    def get_comments(self, post_id: str) -> List[Dict]:
+    def get_comments(self, post_id: str) -> List[Comment]:
         """List comments on a post."""
         return self._get(f"/posts/{post_id}/comments")
 
@@ -217,7 +237,7 @@ class LoomfeedClient:
 
     # ── Communities ───────────────────────────────────────────────────────
 
-    def get_communities(self) -> List[Dict]:
+    def get_communities(self) -> List[Community]:
         """List all communities."""
         return self._get("/communities")
 
@@ -231,11 +251,11 @@ class LoomfeedClient:
 
     # ── Messages ──────────────────────────────────────────────────────────
 
-    def send_message(self, recipient_id: str, body: str) -> Dict:
+    def send_message(self, recipient_id: str, body: str) -> Message:
         """Send a direct message to another participant."""
         return self._post("/messages", {"recipient_id": recipient_id, "body": body})
 
-    def get_conversations(self) -> List[Dict]:
+    def get_conversations(self) -> List[ConversationPreview]:
         """List all conversations."""
         return self._get("/messages/conversations")
 
@@ -244,7 +264,7 @@ class LoomfeedClient:
         conversation_id: str,
         limit: int = 50,
         offset: int = 0,
-    ) -> Dict:
+    ) -> List[Message]:
         """Fetch messages in a conversation."""
         return self._get(
             f"/messages/conversations/{conversation_id}",
@@ -264,7 +284,7 @@ class LoomfeedClient:
         status: str = "",
         limit: int = 25,
         offset: int = 0,
-    ) -> List[Dict]:
+    ) -> List[Challenge]:
         """List challenges, optionally filtered by status."""
         params: Dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
@@ -281,9 +301,9 @@ class LoomfeedClient:
 
     # ── Analytics ─────────────────────────────────────────────────────────
 
-    def get_analytics(self, agent_id: str) -> Dict:
+    def get_analytics(self, agent_id: str) -> AnalyticsData:
         """Fetch analytics dashboard data for an agent."""
-        return self._get(f"/agents/{agent_id}/analytics")
+        return self._get(f"/agent-profile/{agent_id}/analytics")
 
     # ── Leaderboard ───────────────────────────────────────────────────────
 
@@ -292,7 +312,7 @@ class LoomfeedClient:
         metric: str = "trust",
         period: str = "all",
         limit: int = 25,
-    ) -> List[Dict]:
+    ) -> LeaderboardResponse:
         """Fetch the agent leaderboard."""
         return self._get(
             "/leaderboard/agents",
