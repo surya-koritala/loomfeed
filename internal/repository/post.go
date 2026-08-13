@@ -688,6 +688,69 @@ func (r *PostRepo) SetQuarantined(ctx context.Context, postID string, quarantine
 	return nil
 }
 
+// PublishQuarantined atomically releases a quarantined post and returns the
+// published row. Exactly one concurrent caller can win the transition.
+func (r *PostRepo) PublishQuarantined(ctx context.Context, postID string) (*models.PostWithAuthor, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin publish quarantined post: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var claimed bool
+	err = tx.QueryRow(ctx, `
+		UPDATE posts p
+		SET quarantined = FALSE, updated_at = NOW()
+		WHERE p.id = $1
+		  AND p.quarantined = TRUE
+		  AND (
+		    p.author_type <> 'agent'
+		    OR p.human_verification_count > 0
+		    OR NOT EXISTS (
+		      SELECT 1 FROM quality_gates q
+		      WHERE q.community_id = p.community_id
+		        AND q.require_human_verification = TRUE
+		    )
+		  )
+		RETURNING TRUE`, postID).Scan(&claimed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var blocked bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1
+			  FROM posts p
+			  JOIN quality_gates q ON q.community_id = p.community_id
+			  WHERE p.id = $1
+			    AND p.quarantined = TRUE
+			    AND p.author_type = 'agent'
+			    AND p.human_verification_count = 0
+			    AND q.require_human_verification = TRUE
+			)`, postID).Scan(&blocked); err != nil {
+			return nil, fmt.Errorf("check human verification gate: %w", err)
+		}
+		if blocked {
+			return nil, ErrHumanVerificationRequired
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("publish quarantined post: %w", err)
+	}
+	if !claimed {
+		return nil, nil
+	}
+
+	row := tx.QueryRow(ctx, postJoinSelect+` WHERE p.id = $1 AND p.deleted_at IS NULL`, postID)
+	published, err := scanPostWithAuthor(row)
+	if err != nil {
+		return nil, fmt.Errorf("read published post: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit published post: %w", err)
+	}
+	return &published, nil
+}
+
 // CreateWithCrosspost inserts a new post with a crossposted_from reference.
 func (r *PostRepo) CreateWithCrosspost(ctx context.Context, p *models.Post) (*models.Post, error) {
 	if p.PostType == "" {
@@ -1040,12 +1103,32 @@ func (r *PostRepo) SetQuestionStatusIfCurrent(ctx context.Context, postID, curre
 	return err
 }
 
-// AcceptAnswer sets the accepted_answer_id on a post.
-func (r *PostRepo) AcceptAnswer(ctx context.Context, postID, commentID string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE posts SET accepted_answer_id = $1 WHERE id = $2`,
-		commentID, postID)
-	return err
+// AcceptAnswer atomically marks a comment as accepted and the question as
+// answered. It returns the answer author's participant ID and whether the
+// question was public at the mutation's commit boundary for downstream
+// reputation and webhook events. The join prevents accepting a comment from a
+// different post or a deleted comment.
+func (r *PostRepo) AcceptAnswer(ctx context.Context, postID, commentID string) (string, bool, error) {
+	var answerAuthorID string
+	var public bool
+	err := r.pool.QueryRow(ctx, `
+		WITH answer AS MATERIALIZED (
+			SELECT id, author_id
+			FROM comments
+			WHERE id = $2
+			  AND post_id = $1
+			  AND deleted_at IS NULL
+			FOR UPDATE
+		)
+		UPDATE posts AS p
+		SET accepted_answer_id = $2,
+		    question_status = $3
+		FROM answer AS c
+		WHERE p.id = $1
+		  AND p.deleted_at IS NULL
+		RETURNING c.author_id, NOT p.quarantined`,
+		postID, commentID, string(models.QuestionStatusAnswered)).Scan(&answerAuthorID, &public)
+	return answerAuthorID, public, err
 }
 
 // ListBySubscriptions returns paginated posts from communities the participant is subscribed to.

@@ -29,17 +29,6 @@ type createWebhookRequest struct {
 	Events []string `json:"events"`
 }
 
-var validWebhookEvents = map[string]bool{
-	"post.created":            true,
-	"comment.created":         true,
-	"mention":                 true,
-	"vote.received":           true,
-	"answer.accepted":         true,
-	"arena.challenge_created": true,
-	"arena.round_opened":      true,
-	"arena.battle_completed":  true,
-}
-
 // Create handles POST /api/v1/webhooks.
 func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r.Context())
@@ -59,11 +48,6 @@ func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := api.ValidateWebhookURL(req.URL); err != nil {
-		api.Error(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
 	if req.Secret == "" {
 		api.Error(w, http.StatusBadRequest, "secret is required")
 		return
@@ -74,10 +58,15 @@ func (h *WebhookHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, ev := range req.Events {
-		if !validWebhookEvents[ev] {
+		if !webhook.IsSupportedEvent(ev) {
 			api.Error(w, http.StatusBadRequest, "invalid event type: "+ev)
 			return
 		}
+	}
+
+	if err := api.ValidateWebhookURL(req.URL); err != nil {
+		api.Error(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	hook, err := h.webhooks.Create(r.Context(), claims.ParticipantID, req.URL, req.Secret, req.Events)
@@ -188,11 +177,25 @@ func (h *WebhookHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send a test event
-	h.dispatcher.Dispatch("test", map[string]any{
-		"webhook_id": webhookID,
-		"message":    "This is a test event from loomfeed",
-	})
+	if h.dispatcher == nil {
+		api.Error(w, http.StatusServiceUnavailable, "webhook delivery is not configured")
+		return
+	}
 
-	api.JSON(w, http.StatusOK, map[string]string{"status": "test event dispatched"})
+	result, deliveryErr := h.dispatcher.DeliverTo(r.Context(), *hook, webhook.EventWebhookTest, map[string]any{
+		"webhook_id": webhookID,
+		"message":    "This is a test event from Loomfeed",
+	})
+	response := map[string]any{
+		"event_id":    result.EventID,
+		"status_code": result.StatusCode,
+	}
+	if deliveryErr != nil || !result.Success {
+		response["status"] = "failed"
+		api.JSON(w, http.StatusBadGateway, response)
+		return
+	}
+
+	response["status"] = "delivered"
+	api.JSON(w, http.StatusOK, response)
 }

@@ -18,11 +18,7 @@ type ArenaHandler struct {
 	arena         *repository.ArenaRepo
 	participants  *repository.ParticipantRepo
 	notifications *repository.NotificationRepo
-	dispatcher    arenaEventDispatcher
-}
-
-type arenaEventDispatcher interface {
-	Dispatch(eventType string, payload map[string]any)
+	dispatcher    webhookEventDispatcher
 }
 
 // NewArenaHandler creates a new ArenaHandler.
@@ -39,7 +35,7 @@ func (h *ArenaHandler) WithNotifications(n *repository.NotificationRepo) {
 }
 
 // WithWebhook wires signed, asynchronous delivery for Arena lifecycle events.
-func (h *ArenaHandler) WithWebhook(dispatcher arenaEventDispatcher) {
+func (h *ArenaHandler) WithWebhook(dispatcher webhookEventDispatcher) {
 	h.dispatcher = dispatcher
 }
 

@@ -15,6 +15,12 @@ type VerificationHandler struct {
 	verifications *repository.VerificationRepo
 	posts         *repository.PostRepo
 	reputation    *repository.ReputationRepo
+	dispatcher    webhookEventDispatcher
+}
+
+// WithWebhook announces gate-held agent posts after human publication.
+func (h *VerificationHandler) WithWebhook(dispatcher webhookEventDispatcher) {
+	h.dispatcher = dispatcher
 }
 
 // NewVerificationHandler creates a new VerificationHandler.
@@ -57,9 +63,13 @@ func (h *VerificationHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.verifications.Verify(r.Context(), postID, claims.ParticipantID); err != nil {
+	published, err := h.verifications.Verify(r.Context(), postID, claims.ParticipantID)
+	if err != nil {
 		api.Error(w, http.StatusInternalServerError, "failed to verify post")
 		return
+	}
+	if published != nil {
+		dispatchPostCreated(h.dispatcher, &published.Post)
 	}
 
 	// Award reputation to the post author for getting verified

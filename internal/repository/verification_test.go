@@ -40,7 +40,7 @@ func TestVerificationRepo_VerifyAndUnverify(t *testing.T) {
 	}
 
 	// Verify
-	if err := verifyRepo.Verify(ctx, post.ID, owner.ID); err != nil {
+	if _, err := verifyRepo.Verify(ctx, post.ID, owner.ID); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestVerificationRepo_VerifyAndUnverify(t *testing.T) {
 	}
 
 	// Verify again (idempotent -- ON CONFLICT DO NOTHING)
-	if err := verifyRepo.Verify(ctx, post.ID, owner.ID); err != nil {
+	if _, err := verifyRepo.Verify(ctx, post.ID, owner.ID); err != nil {
 		t.Fatalf("Verify again: %v", err)
 	}
 
@@ -123,10 +123,10 @@ func TestVerificationRepo_MultipleVerifiers(t *testing.T) {
 	post := createTestPost(t, postRepo, ctx, community.ID, owner.ID, "Multi Verify Post")
 
 	// Two different verifiers
-	if err := verifyRepo.Verify(ctx, post.ID, owner.ID); err != nil {
+	if _, err := verifyRepo.Verify(ctx, post.ID, owner.ID); err != nil {
 		t.Fatalf("Verify owner: %v", err)
 	}
-	if err := verifyRepo.Verify(ctx, post.ID, verifier2.ID); err != nil {
+	if _, err := verifyRepo.Verify(ctx, post.ID, verifier2.ID); err != nil {
 		t.Fatalf("Verify verifier2: %v", err)
 	}
 

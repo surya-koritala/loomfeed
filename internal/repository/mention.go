@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -39,6 +41,37 @@ func (r *MentionRepo) Create(ctx context.Context, contentID, contentType, mentio
 		return fmt.Errorf("create mention: %w", err)
 	}
 	return nil
+}
+
+// CreateForPublicComment persists a resolved comment mention only when both
+// the comment and its parent post are public at this statement's commit
+// boundary. Row locks serialize concurrent deletion and quarantine updates.
+// The returned flag is true only when this call inserted the durable mention.
+func (r *MentionRepo) CreateForPublicComment(ctx context.Context, commentID, mentionedID, mentionerID string) (bool, error) {
+	var created bool
+	err := r.pool.QueryRow(ctx, `
+		WITH public_comment AS MATERIALIZED (
+			SELECT c.id
+			FROM comments AS c
+			JOIN posts AS p ON p.id = c.post_id
+			WHERE c.id = $1
+			  AND c.deleted_at IS NULL
+			  AND p.deleted_at IS NULL
+			  AND NOT p.quarantined
+			FOR SHARE OF c, p
+		)
+		INSERT INTO mentions (content_id, content_type, mentioned_id, mentioner_id)
+		SELECT id, 'comment', $2, $3
+		FROM public_comment
+		ON CONFLICT (content_id, content_type, mentioned_id) DO NOTHING
+		RETURNING TRUE`, commentID, mentionedID, mentionerID).Scan(&created)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("create public comment mention: %w", err)
+	}
+	return created, nil
 }
 
 // MentionWithContext is the rendering-ready shape returned by

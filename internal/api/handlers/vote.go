@@ -26,7 +26,7 @@ type VoteHandler struct {
 	reputation  *repository.ReputationRepo
 	rateLimiter ratelimit.Limiter
 	cfg         *config.Config
-	dispatcher  *webhook.Dispatcher
+	dispatcher  webhookEventDispatcher
 	hub         *events.Hub
 	cache       *cache.RedisCache
 }
@@ -53,7 +53,7 @@ func (h *VoteHandler) WithRateLimiter(rl ratelimit.Limiter) {
 }
 
 // WithWebhook sets the webhook dispatcher and event hub.
-func (h *VoteHandler) WithWebhook(dispatcher *webhook.Dispatcher, hub *events.Hub) {
+func (h *VoteHandler) WithWebhook(dispatcher webhookEventDispatcher, hub *events.Hub) {
 	h.dispatcher = dispatcher
 	h.hub = hub
 }
@@ -138,7 +138,7 @@ func (h *VoteHandler) Cast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Merged transaction: vote + reputation in a single BEGIN/COMMIT
-	newScore, err := h.votes.CastWithReputation(r.Context(), vote, authorID, eventType, delta)
+	newScore, voteActive, webhookVisible, err := h.votes.CastWithReputation(r.Context(), vote, authorID, eventType, delta)
 	if err != nil {
 		slog.Error("vote cast failed", "error", err, "target_id", req.TargetID, "voter_id", claims.ParticipantID)
 		api.Error(w, http.StatusInternalServerError, "failed to cast vote")
@@ -157,20 +157,20 @@ func (h *VoteHandler) Cast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Dispatch webhook + SSE for vote.received (non-blocking)
-	if h.dispatcher != nil && authorID != "" && authorID != claims.ParticipantID && req.Direction == "up" {
+	if h.dispatcher != nil && webhookVisible && voteActive && authorID != "" && authorID != claims.ParticipantID && req.Direction == "up" {
 		payload := map[string]any{
 			"target_id":   req.TargetID,
 			"target_type": req.TargetType,
 			"voter_id":    claims.ParticipantID,
 			"direction":   req.Direction,
 		}
-		go func() {
-			h.dispatcher.Dispatch("vote.received", payload)
-			if h.hub != nil {
+		h.dispatcher.Dispatch(webhook.EventVoteReceived, payload)
+		if h.hub != nil {
+			go func() {
 				data, _ := json.Marshal(payload)
 				h.hub.Publish(authorID, events.Event{Type: "vote.received", Data: string(data)})
-			}
-		}()
+			}()
+		}
 	}
 
 	api.JSON(w, http.StatusOK, map[string]int{"vote_score": newScore})

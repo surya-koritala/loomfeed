@@ -26,13 +26,16 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/webhook"
 )
 
-// truncate returns the first n runes of s, appending "..." if truncated.
+// truncate returns at most n runes, including the "..." suffix when truncated.
 func truncate(s string, n int) string {
 	runes := []rune(s)
 	if len(runes) <= n {
 		return s
 	}
-	return string(runes[:n]) + "..."
+	if n <= 3 {
+		return string(runes[:n])
+	}
+	return string(runes[:n-3]) + "..."
 }
 
 // CommentHandler handles comment endpoints.
@@ -47,7 +50,7 @@ type CommentHandler struct {
 	reports          *repository.ReportRepo
 	rateLimiter      ratelimit.Limiter
 	cfg              *config.Config
-	dispatcher       *webhook.Dispatcher
+	dispatcher       webhookEventDispatcher
 	hub              *events.Hub
 	cache            *cache.RedisCache
 	votes            *repository.VoteRepo
@@ -139,7 +142,7 @@ func (h *CommentHandler) WithRateLimiter(rl ratelimit.Limiter) {
 }
 
 // WithWebhook sets the webhook dispatcher and event hub.
-func (h *CommentHandler) WithWebhook(dispatcher *webhook.Dispatcher, hub *events.Hub) {
+func (h *CommentHandler) WithWebhook(dispatcher webhookEventDispatcher, hub *events.Hub) {
 	h.dispatcher = dispatcher
 	h.hub = hub
 }
@@ -302,6 +305,23 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		_ = h.cache.BumpVersion(r.Context(), "feed")
 		_ = h.cache.BumpVersion(r.Context(), "activity")
 	}
+	webhookVisible := true
+	if h.posts != nil {
+		parentPost, err := h.posts.GetByID(r.Context(), postID)
+		webhookVisible = err == nil && parentPost != nil && !parentPost.Quarantined
+	}
+
+	commentCreatedPayload := map[string]any{
+		"comment_id":   result.ID,
+		"post_id":      postID,
+		"author_id":    claims.ParticipantID,
+		"body_excerpt": truncate(req.Body, 200),
+	}
+	// CommentRepo.Create has committed before returning. Dispatch at that
+	// boundary instead of coupling the event to best-effort notification work.
+	if h.dispatcher != nil && webhookVisible {
+		h.dispatcher.Dispatch(webhook.EventCommentCreated, commentCreatedPayload)
+	}
 
 	// Notify post author about the new comment (if commenter is not
 	// the post author). Also notify the parent comment's author for
@@ -361,23 +381,14 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// downstream consumers only watch comment.created.)
 		_ = postAuthorID
 
-		// Dispatch webhook + SSE for comment.created
-		if h.dispatcher != nil {
-			payload := map[string]any{
-				"comment_id":   commentID,
-				"post_id":      postID,
-				"author_id":    claims.ParticipantID,
-				"body_excerpt": truncate(req.Body, 200),
-			}
-			h.dispatcher.Dispatch("comment.created", payload)
-			if h.hub != nil {
-				data, _ := json.Marshal(payload)
-				// Post-author inbox (personal notification).
-				h.hub.Publish(postAuthorID, events.Event{Type: "comment.created", Data: string(data)})
-				// Post room — drives /post/{id} live-thread mode for
-				// every client currently viewing the post.
-				h.hub.Publish("post:"+postID, events.Event{Type: "comment.created", Data: string(data)})
-			}
+		// SSE complements the webhook with live in-app updates.
+		if h.hub != nil {
+			data, _ := json.Marshal(commentCreatedPayload)
+			// Post-author inbox (personal notification).
+			h.hub.Publish(postAuthorID, events.Event{Type: "comment.created", Data: string(data)})
+			// Post room — drives /post/{id} live-thread mode for
+			// every client currently viewing the post.
+			h.hub.Publish("post:"+postID, events.Event{Type: "comment.created", Data: string(data)})
 		}
 	}()
 
@@ -468,8 +479,9 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 				}
+				mentionPublic := false
 				if h.mentions != nil {
-					_ = h.mentions.Create(ctx, commentID, "comment", p.ID, commenterID)
+					mentionPublic, _ = h.mentions.CreateForPublicComment(ctx, commentID, p.ID, commenterID)
 				}
 				actorID := commenterID
 				cID := commentID
@@ -477,14 +489,14 @@ func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) {
 				_ = h.notifications.Create(ctx, p.ID, "mention", &actorID, &postIDCopy, &cID, msg)
 
 				// Dispatch webhook + SSE for mention.
-				if h.dispatcher != nil {
+				if h.dispatcher != nil && mentionPublic {
 					payload := map[string]any{
 						"comment_id":   cID,
 						"post_id":      postIDCopy,
 						"mentioned_by": commenterID,
 						"mentioned_id": p.ID,
 					}
-					h.dispatcher.Dispatch("mention", payload)
+					h.dispatcher.Dispatch(webhook.EventMention, payload)
 					if h.hub != nil {
 						data, _ := json.Marshal(payload)
 						h.hub.Publish(p.ID, events.Event{Type: "mention", Data: string(data)})

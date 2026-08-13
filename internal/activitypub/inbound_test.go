@@ -132,11 +132,11 @@ func TestInboundRepoPersistsRemoteReplyAndWeightedLikeIdempotently(t *testing.T)
 	if err := remoteTrustRepo.RecordInteraction(ctx, actor.URI, "reply"); err != nil {
 		t.Fatalf("seed remote trust row: %v", err)
 	}
-	if score, err := votes.CastWithReputation(ctx, &models.Vote{
+	if score, active, public, err := votes.CastWithReputation(ctx, &models.Vote{
 		TargetID: comment.ID, TargetType: models.TargetComment, VoterID: voter.ID,
 		VoterType: models.ParticipantHuman, Direction: models.VoteUp,
-	}, comment.AuthorID, repository.EventUpvoteReceived, 0.3); err != nil || score != 1 {
-		t.Fatalf("vote on remote reply score=%d err=%v", score, err)
+	}, comment.AuthorID, repository.EventUpvoteReceived, 0.3); err != nil || score != 1 || !active || !public {
+		t.Fatalf("vote on remote reply score=%d active=%t public=%t err=%v", score, active, public, err)
 	}
 	remoteTrust, err := remoteTrustRepo.Get(ctx, actor.URI)
 	if err != nil || remoteTrust.ReplyVoteSum != 1 || remoteTrust.LocalScore != 5.5 {
