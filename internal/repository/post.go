@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/models"
 )
 
@@ -473,6 +475,47 @@ const postJoinSelectWithTotal = `
 // Create inserts a new post. Defaults post_type to "text" if empty.
 // Also atomically increments the author's post_count on the participants table.
 func (r *PostRepo) Create(ctx context.Context, p *models.Post) (*models.Post, error) {
+	return createPost(ctx, r.pool, p)
+}
+
+// CreateWithProvenance creates a post, its provenance row, and the durable
+// posts.provenance_id link in one transaction. No post or counter increment is
+// committed when provenance insertion or attachment fails.
+func (r *PostRepo) CreateWithProvenance(ctx context.Context, p *models.Post, provenance *models.Provenance) (*models.Post, *models.Provenance, error) {
+	var result *models.Post
+	var resultProvenance *models.Provenance
+	err := database.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		created, err := createPost(ctx, tx, p)
+		if err != nil {
+			return err
+		}
+
+		provenance.ContentID = created.ID
+		provenance.ContentType = models.TargetPost
+		provenance.AuthorID = created.AuthorID
+		createdProvenance, err := createProvenance(ctx, tx, provenance)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(ctx,
+			`UPDATE posts SET provenance_id = $1 WHERE id = $2`,
+			createdProvenance.ID, created.ID,
+		); err != nil {
+			return fmt.Errorf("attach post provenance: %w", err)
+		}
+		created.ProvenanceID = &createdProvenance.ID
+		result = created
+		resultProvenance = createdProvenance
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, resultProvenance, nil
+}
+
+func createPost(ctx context.Context, db database.DBTX, p *models.Post) (*models.Post, error) {
 	if p.PostType == "" {
 		p.PostType = models.PostTypeText
 	}
@@ -491,7 +534,7 @@ func (r *PostRepo) Create(ctx context.Context, p *models.Post) (*models.Post, er
 
 	var result models.Post
 	var resultMetaBytes []byte
-	err = r.pool.QueryRow(ctx, `
+	err = db.QueryRow(ctx, `
 		WITH inserted AS (
 			INSERT INTO posts
 			  (community_id, author_id, author_type, title, body, url, post_type,

@@ -132,6 +132,49 @@ func TestPostRepo_Create_DefaultPostType(t *testing.T) {
 	}
 }
 
+func TestPostRepo_CreateWithProvenance_RollsBackWhenProvenanceFails(t *testing.T) {
+	pool := database.TestPool(t)
+	database.CleanupTables(t, pool, "provenances", "posts", "communities", "participants")
+
+	participantRepo := repository.NewParticipantRepo(pool)
+	communityRepo := repository.NewCommunityRepo(pool)
+	postRepo := repository.NewPostRepo(pool)
+	ctx := context.Background()
+
+	owner := createTestOwner(t, participantRepo, ctx, "post-provenance-rollback")
+	community := createTestCommunity(t, communityRepo, ctx, owner.ID, "post-provenance-rollback")
+
+	_, _, err := postRepo.CreateWithProvenance(ctx, &models.Post{
+		CommunityID: community.ID,
+		AuthorID:    owner.ID,
+		AuthorType:  models.ParticipantHuman,
+		Title:       "Must Roll Back",
+		Body:        "The post must not survive a provenance failure.",
+	}, &models.Provenance{
+		Sources:          []string{"https://example.com/source"},
+		GenerationMethod: models.GenerationMethod("invalid_generation_method"),
+	})
+	if err == nil {
+		t.Fatal("expected invalid provenance generation method to fail")
+	}
+
+	posts, total, listErr := postRepo.ListByCommunity(ctx, community.ID, "new", "", 10, 0)
+	if listErr != nil {
+		t.Fatalf("ListByCommunity after rollback: %v", listErr)
+	}
+	if total != 0 || len(posts) != 0 {
+		t.Fatalf("expected no post after provenance rollback, got total=%d rows=%d", total, len(posts))
+	}
+
+	persistedOwner, getErr := participantRepo.GetByID(ctx, owner.ID)
+	if getErr != nil {
+		t.Fatalf("GetByID owner after rollback: %v", getErr)
+	}
+	if persistedOwner.PostCount != 0 {
+		t.Fatalf("expected post_count rollback to 0, got %d", persistedOwner.PostCount)
+	}
+}
+
 func TestPostRepo_ListByCommunity_SortNew(t *testing.T) {
 	pool := database.TestPool(t)
 	database.CleanupTables(t, pool, "posts", "communities", "participants")

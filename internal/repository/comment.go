@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/surya-koritala/loomfeed/internal/database"
 	"github.com/surya-koritala/loomfeed/internal/models"
 )
 
@@ -62,12 +63,51 @@ func (r *CommentRepo) Pool() *pgxpool.Pool {
 // Also atomically increments the post's comment_count and the author's
 // comment_count on the participants table using CTEs to reduce round-trips.
 func (r *CommentRepo) Create(ctx context.Context, c *models.Comment) (*models.Comment, error) {
+	return createComment(ctx, r.pool, c)
+}
+
+// CreateWithProvenance creates a comment, its provenance row, and the durable
+// comments.provenance_id link in one transaction. The comment and both counter
+// increments roll back if provenance insertion or attachment fails.
+func (r *CommentRepo) CreateWithProvenance(ctx context.Context, c *models.Comment, provenance *models.Provenance) (*models.Comment, error) {
+	var result *models.Comment
+	err := database.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		created, err := createComment(ctx, tx, c)
+		if err != nil {
+			return err
+		}
+
+		provenance.ContentID = created.ID
+		provenance.ContentType = models.TargetComment
+		provenance.AuthorID = created.AuthorID
+		createdProvenance, err := createProvenance(ctx, tx, provenance)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(ctx,
+			`UPDATE comments SET provenance_id = $1 WHERE id = $2`,
+			createdProvenance.ID, created.ID,
+		); err != nil {
+			return fmt.Errorf("attach comment provenance: %w", err)
+		}
+		created.ProvenanceID = &createdProvenance.ID
+		result = created
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func createComment(ctx context.Context, db database.DBTX, c *models.Comment) (*models.Comment, error) {
 	depth := 0
 	if c.ParentCommentID != nil && *c.ParentCommentID != "" {
 		// Parent depth lookup still needed — cannot be combined into the CTE
 		// because we need the depth value for the INSERT.
 		var parentDepth int
-		err := r.pool.QueryRow(ctx, `SELECT depth FROM comments WHERE id = $1 AND deleted_at IS NULL`, *c.ParentCommentID).Scan(&parentDepth)
+		err := db.QueryRow(ctx, `SELECT depth FROM comments WHERE id = $1 AND deleted_at IS NULL`, *c.ParentCommentID).Scan(&parentDepth)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("parent comment not found: %w", pgx.ErrNoRows)
@@ -86,7 +126,7 @@ func (r *CommentRepo) Create(ctx context.Context, c *models.Comment) (*models.Co
 		threadType = "main"
 	}
 
-	err := r.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		WITH inserted AS (
 			INSERT INTO comments
 			  (post_id, parent_comment_id, author_id, author_type, body,
@@ -200,6 +240,9 @@ func (r *CommentRepo) GetByID(ctx context.Context, id string) (*models.Comment, 
 // GetByIDWithAuthor returns a single comment with joined author data.
 func (r *CommentRepo) GetByIDWithAuthor(ctx context.Context, id string) (*models.CommentWithAuthor, error) {
 	var cwa models.CommentWithAuthor
+	var provenanceSources []string
+	var provenanceConfidence *float64
+	var provenanceMethod *string
 	err := r.pool.QueryRow(ctx, `
 		SELECT
 			c.id, c.post_id, c.parent_comment_id, c.author_id, c.author_type,
@@ -209,9 +252,12 @@ func (r *CommentRepo) GetByIDWithAuthor(ctx context.Context, id string) (*models
 			p.id, p.type, p.display_name,
 			COALESCE(p.avatar_url, '') AS avatar_url,
 			COALESCE(p.bio, '') AS bio,
-			p.trust_score, p.reputation_score, p.is_verified, p.created_at, p.updated_at
+			p.trust_score, p.reputation_score, p.is_verified, p.created_at, p.updated_at,
+			COALESCE(prov.sources, '{}') AS provenance_sources,
+			prov.confidence_score, prov.generation_method::text
 		FROM comments c
 		JOIN participants p ON p.id = c.author_id
+		LEFT JOIN provenances prov ON prov.id = c.provenance_id
 		WHERE c.id = $1`, id).Scan(
 		&cwa.ID, &cwa.PostID, &cwa.ParentCommentID, &cwa.AuthorID, &cwa.AuthorType,
 		&cwa.Body, &cwa.ProvenanceID, &cwa.ConfidenceScore,
@@ -221,11 +267,36 @@ func (r *CommentRepo) GetByIDWithAuthor(ctx context.Context, id string) (*models
 		&cwa.Author.AvatarURL, &cwa.Author.Bio,
 		&cwa.Author.TrustScore, &cwa.Author.ReputationScore, &cwa.Author.IsVerified,
 		&cwa.Author.CreatedAt, &cwa.Author.UpdatedAt,
+		&provenanceSources, &provenanceConfidence, &provenanceMethod,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get comment with author: %w", err)
 	}
+	populateCommentProvenance(&cwa, provenanceSources, provenanceConfidence, provenanceMethod)
 	return &cwa, nil
+}
+
+func populateCommentProvenance(c *models.CommentWithAuthor, sources []string, confidence *float64, method *string) {
+	if c.ProvenanceID == nil {
+		return
+	}
+	if sources == nil {
+		sources = []string{}
+	}
+	provenance := &models.Provenance{
+		ID:          *c.ProvenanceID,
+		ContentID:   c.ID,
+		ContentType: models.TargetComment,
+		AuthorID:    c.AuthorID,
+		Sources:     sources,
+	}
+	if confidence != nil {
+		provenance.ConfidenceScore = *confidence
+	}
+	if method != nil {
+		provenance.GenerationMethod = models.GenerationMethod(*method)
+	}
+	c.Provenance = provenance
 }
 
 // Update edits an existing comment's body. Only updates non-deleted comments.
@@ -336,10 +407,13 @@ func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string
 			COALESCE(p.bio, '') AS bio,
 			p.trust_score, p.reputation_score, p.is_verified, p.created_at, p.updated_at,
 			COALESCE(a.model_provider, '') AS model_provider,
-			COALESCE(a.model_name, '') AS model_name
+			COALESCE(a.model_name, '') AS model_name,
+			COALESCE(prov.sources, '{}') AS provenance_sources,
+			prov.confidence_score, prov.generation_method::text
 		FROM comments c
 		JOIN participants p ON p.id = c.author_id
 		LEFT JOIN agent_identities a ON a.participant_id = c.author_id
+		LEFT JOIN provenances prov ON prov.id = c.provenance_id
 		`+anchorJoin+`
 		WHERE c.post_id = $1`+modeFilter+cursorFilter+`
 		ORDER BY `+orderBy+`
@@ -355,6 +429,9 @@ func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string
 	for rows.Next() {
 		var cwa models.CommentWithAuthor
 		var modelProvider, modelName string
+		var provenanceSources []string
+		var provenanceConfidence *float64
+		var provenanceMethod *string
 		if err := rows.Scan(
 			&cwa.ID, &cwa.PostID, &cwa.ParentCommentID, &cwa.AuthorID, &cwa.AuthorType,
 			&cwa.Body, &cwa.ProvenanceID, &cwa.ConfidenceScore,
@@ -365,11 +442,13 @@ func (r *CommentRepo) ListByPost(ctx context.Context, postID string, sort string
 			&cwa.Author.TrustScore, &cwa.Author.ReputationScore, &cwa.Author.IsVerified,
 			&cwa.Author.CreatedAt, &cwa.Author.UpdatedAt,
 			&modelProvider, &modelName,
+			&provenanceSources, &provenanceConfidence, &provenanceMethod,
 		); err != nil {
 			return nil, fmt.Errorf("scanning comment row: %w", err)
 		}
 		cwa.Author.ModelProvider = modelProvider
 		cwa.Author.ModelName = modelName
+		populateCommentProvenance(&cwa, provenanceSources, provenanceConfidence, provenanceMethod)
 		comments = append(comments, cwa)
 	}
 	if err := rows.Err(); err != nil {
@@ -478,9 +557,12 @@ func (r *CommentRepo) ListDescendants(ctx context.Context, id string, maxDepth, 
 			p.id, p.type, p.display_name,
 			COALESCE(p.avatar_url, '') AS avatar_url,
 			COALESCE(p.bio, '') AS bio,
-			p.trust_score, p.reputation_score, p.is_verified, p.created_at, p.updated_at
+			p.trust_score, p.reputation_score, p.is_verified, p.created_at, p.updated_at,
+			COALESCE(prov.sources, '{}') AS provenance_sources,
+			prov.confidence_score, prov.generation_method::text
 		FROM descendants c
 		JOIN participants p ON p.id = c.author_id
+		LEFT JOIN provenances prov ON prov.id = c.provenance_id
 		ORDER BY c.rel_depth ASC, c.created_at ASC %s`, depthFilter, limitClause)
 
 	rows, err := r.pool.Query(ctx, q, id)
@@ -492,6 +574,9 @@ func (r *CommentRepo) ListDescendants(ctx context.Context, id string, maxDepth, 
 	out := []models.CommentWithAuthor{}
 	for rows.Next() {
 		var cwa models.CommentWithAuthor
+		var provenanceSources []string
+		var provenanceConfidence *float64
+		var provenanceMethod *string
 		if err := rows.Scan(
 			&cwa.ID, &cwa.PostID, &cwa.ParentCommentID, &cwa.AuthorID, &cwa.AuthorType,
 			&cwa.Body, &cwa.ProvenanceID, &cwa.ConfidenceScore,
@@ -501,9 +586,11 @@ func (r *CommentRepo) ListDescendants(ctx context.Context, id string, maxDepth, 
 			&cwa.Author.AvatarURL, &cwa.Author.Bio,
 			&cwa.Author.TrustScore, &cwa.Author.ReputationScore, &cwa.Author.IsVerified,
 			&cwa.Author.CreatedAt, &cwa.Author.UpdatedAt,
+			&provenanceSources, &provenanceConfidence, &provenanceMethod,
 		); err != nil {
 			return nil, fmt.Errorf("scan descendant row: %w", err)
 		}
+		populateCommentProvenance(&cwa, provenanceSources, provenanceConfidence, provenanceMethod)
 		out = append(out, cwa)
 	}
 	return out, rows.Err()

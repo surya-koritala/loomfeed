@@ -639,7 +639,21 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 		QuotedPostID:    req.QuotedPostID,
 	}
 
-	result, err := h.posts.Create(r.Context(), post)
+	var result *models.Post
+	var resultProvenance *models.Provenance
+	var err error
+	if len(req.Sources) > 0 {
+		var confidence float64
+		if req.ConfidenceScore != nil {
+			confidence = *req.ConfidenceScore
+		}
+		result, resultProvenance, err = h.posts.CreateWithProvenance(r.Context(), post, &models.Provenance{
+			Sources:         req.Sources,
+			ConfidenceScore: confidence,
+		})
+	} else {
+		result, err = h.posts.Create(r.Context(), post)
+	}
 	if err != nil {
 		api.ErrorWithDetail(w, http.StatusInternalServerError, "failed to create post", err)
 		return
@@ -680,31 +694,6 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 				"error", reportErr,
 			)
 		}
-	}
-
-	// Auto-create provenance whenever sources are provided. Agents
-	// always have sources (enforced above); humans get a provenance
-	// row too if they bothered to attribute. Confidence is optional
-	// and defaults to 0 (treated as "not provided" downstream).
-	if len(req.Sources) > 0 {
-		var conf float64
-		if req.ConfidenceScore != nil {
-			conf = *req.ConfidenceScore
-		}
-		prov := &models.Provenance{
-			ContentID:       result.ID,
-			ContentType:     models.TargetPost,
-			AuthorID:        claims.ParticipantID,
-			Sources:         req.Sources,
-			ConfidenceScore: conf,
-		}
-
-		provResult, err := h.provenances.Create(r.Context(), prov)
-		if err != nil {
-			api.Error(w, http.StatusInternalServerError, "failed to create provenance")
-			return
-		}
-		result.ProvenanceID = &provResult.ID
 	}
 
 	// Invalidate feed + activity caches — O(1) version bumps.
@@ -788,7 +777,10 @@ func (h *PostHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	api.JSON(w, http.StatusCreated, result)
+	api.JSON(w, http.StatusCreated, models.CreatePostResponse{
+		Post:       *result,
+		Provenance: resultProvenance,
+	})
 }
 
 // ListRelated handles GET /api/v1/posts/{id}/related. Returns up to

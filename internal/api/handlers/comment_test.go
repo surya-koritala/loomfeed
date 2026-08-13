@@ -86,6 +86,61 @@ func TestCommentHandler_Create_Success(t *testing.T) {
 	}
 }
 
+func TestCommentHandler_CreateWithSources_PersistsProvenanceOnRead(t *testing.T) {
+	handler, participants, communities, posts, cfg := setupCommentTest(t)
+	participant, token := registerTestUser(t, participants, cfg, "sourced-comment@example.com", "Sourced Commenter")
+	community := createTestCommunity(t, communities, participant.ID, "sourced-comment-test")
+	post := createTestPost(t, posts, community.ID, participant.ID)
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/v1/posts/{id}/comments", middleware.Auth(cfg.JWT.Secret)(http.HandlerFunc(handler.Create)))
+	mux.HandleFunc("GET /api/v1/posts/{id}/comments", handler.ListByPost)
+
+	confidence := 0.88
+	wantSources := []string{"https://example.com/research", "https://example.org/evidence"}
+	createReq := testutil.JSONRequestWithAuth(t, http.MethodPost, "/api/v1/posts/"+post.ID+"/comments", token, models.CreateCommentRequest{
+		Body:            "This conclusion is supported by the linked research.",
+		Sources:         wantSources,
+		ConfidenceScore: &confidence,
+	})
+	createRec := httptest.NewRecorder()
+	mux.ServeHTTP(createRec, createReq)
+	testutil.AssertStatus(t, createRec, http.StatusCreated)
+
+	var created models.CommentWithAuthor
+	testutil.DecodeResponse(t, createRec, &created)
+	assertProvenanceSources(t, created.Provenance, wantSources)
+
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/v1/posts/"+post.ID+"/comments?sort=new&limit=10", nil))
+	testutil.AssertStatus(t, listRec, http.StatusOK)
+
+	var comments []models.CommentWithAuthor
+	testutil.DecodeResponse(t, listRec, &comments)
+	if len(comments) != 1 {
+		t.Fatalf("expected one persisted comment, got %d", len(comments))
+	}
+	if comments[0].ID != created.ID {
+		t.Fatalf("read-back comment ID = %q, want %q", comments[0].ID, created.ID)
+	}
+	assertProvenanceSources(t, comments[0].Provenance, wantSources)
+}
+
+func assertProvenanceSources(t *testing.T, provenance *models.Provenance, want []string) {
+	t.Helper()
+	if provenance == nil {
+		t.Fatal("expected provenance")
+	}
+	if len(provenance.Sources) != len(want) {
+		t.Fatalf("expected %d comment sources, got %d", len(want), len(provenance.Sources))
+	}
+	for i, source := range want {
+		if provenance.Sources[i] != source {
+			t.Errorf("comment source[%d] = %q, want %q", i, provenance.Sources[i], source)
+		}
+	}
+}
+
 func TestCommentHandler_Create_MissingBody(t *testing.T) {
 	handler, participants, communities, posts, cfg := setupCommentTest(t)
 	participant, token := registerTestUser(t, participants, cfg, "nobody@example.com", "NoBody")

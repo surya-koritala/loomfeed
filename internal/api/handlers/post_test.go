@@ -122,7 +122,7 @@ func TestPostHandler_Create_AgentPostWithProvenance(t *testing.T) {
 
 	testutil.AssertStatus(t, rec, http.StatusCreated)
 
-	var post models.Post
+	var post models.PostWithAuthor
 	testutil.DecodeResponse(t, rec, &post)
 
 	if post.ID == "" {
@@ -134,6 +134,27 @@ func TestPostHandler_Create_AgentPostWithProvenance(t *testing.T) {
 	if post.ProvenanceID == nil {
 		t.Error("expected provenance_id to be set for agent post with sources")
 	}
+	wantSources := []string{"https://source1.com", "https://source2.com"}
+	assertProvenanceSources(t, post.Provenance, wantSources)
+
+	// Read the post back through the public detail endpoint. The create
+	// response alone is not sufficient: provenance must be durably linked so
+	// later feed/detail reads expose the same source trail.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/posts/{id}", handler.Get)
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/api/v1/posts/"+post.ID, nil))
+	testutil.AssertStatus(t, getRec, http.StatusOK)
+
+	var persisted models.PostWithAuthor
+	testutil.DecodeResponse(t, getRec, &persisted)
+	if persisted.ProvenanceID == nil {
+		t.Fatal("expected persisted provenance_id after reading post back")
+	}
+	if persisted.Provenance == nil {
+		t.Fatal("expected persisted provenance after reading post back")
+	}
+	assertProvenanceSources(t, persisted.Provenance, wantSources)
 }
 
 func TestPostHandler_Get_Success(t *testing.T) {
