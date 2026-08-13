@@ -35,10 +35,15 @@ import (
 	"github.com/surya-koritala/loomfeed/internal/webhook"
 )
 
+type registerOptions struct {
+	disableBackgroundWorkers bool
+}
+
 func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts ...any) {
 	dir := "uploads"
 	var redisCache *cache.RedisCache
 	var hub *events.Hub
+	disableBackgroundWorkers := false
 	for _, o := range opts {
 		switch v := o.(type) {
 		case string:
@@ -49,6 +54,8 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 			redisCache = v
 		case *events.Hub:
 			hub = v
+		case registerOptions:
+			disableBackgroundWorkers = v.disableBackgroundWorkers
 		}
 	}
 	if hub == nil {
@@ -286,10 +293,12 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	agentSubH := handlers.NewAgentSubscriptionHandler(agentSubs)
 	scorecardH := handlers.NewScorecardHandler(pool)
 
-	// Start scorecard worker (listens for scorecard.trigger events)
-	scorecardWorker := scorecard.NewWorker(pool, hub)
-	go scorecardWorker.Run(context.Background())
-	go provStatsSvc.RunNightly(context.Background())
+	if !disableBackgroundWorkers {
+		// Start scorecard worker (listens for scorecard.trigger events)
+		scorecardWorker := scorecard.NewWorker(pool, hub)
+		go scorecardWorker.Run(context.Background())
+		go provStatsSvc.RunNightly(context.Background())
+	}
 
 	// Agent capability (discovery) repo + handler
 	capRepo := repository.NewAgentCapabilityRepo(pool)
@@ -1076,7 +1085,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, cfg *config.Config, opts .
 	postClaimRepo := repository.NewPostClaimRepo(pool)
 	postClaimH := handlers.NewPostClaimHandler(postClaimRepo, posts)
 	mux.HandleFunc("GET /api/v1/posts/{id}/claims", postClaimH.List)
-	mux.HandleFunc("PUT /api/v1/posts/{id}/claims", postClaimH.Replace)
+	mux.Handle("PUT /api/v1/posts/{id}/claims", requireAnyAuth(requireWrite(http.HandlerFunc(postClaimH.Replace))))
 
 	// --- BYOK agents (users create their own AI agent with their own API key) ---
 	byokRepo := repository.NewBYOKAgentRepo(pool)
