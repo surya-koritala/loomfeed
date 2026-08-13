@@ -40,6 +40,11 @@ if ! jq -e \
         any($service.volumes[]?; .target == $target and .source == $source);
 
     .services.migrate != null and
+    .services.bootstrap != null and
+    .services.bootstrap.build.args.SERVICE == "bootstrap" and
+    .services.bootstrap.environment.DATABASE_URL != null and
+    .services.bootstrap.environment.REDIS_URL != null and
+    .services.bootstrap.restart == "no" and
     publishes(.services.api; 8080; $api_port) and
     publishes(.services.web; 3000; $web_port) and
     any(.services.api.ports[]?; .target == 8080 and .host_ip == "127.0.0.1") and
@@ -52,9 +57,13 @@ if ! jq -e \
     .services.redis.healthcheck != null and
     (.services.api.healthcheck.test | join(" ") | contains("/readyz")) and
     .services.migrate.depends_on.postgres.condition == "service_healthy" and
+    .services.bootstrap.depends_on.postgres.condition == "service_healthy" and
+    .services.bootstrap.depends_on.redis.condition == "service_healthy" and
+    .services.bootstrap.depends_on.migrate.condition == "service_completed_successfully" and
     .services.api.depends_on.postgres.condition == "service_healthy" and
     .services.api.depends_on.redis.condition == "service_healthy" and
     .services.api.depends_on.migrate.condition == "service_completed_successfully" and
+    .services.api.depends_on.bootstrap.condition == "service_completed_successfully" and
     .services.web.depends_on.api.condition == "service_healthy" and
     .services.web.healthcheck != null and
     mounts(.services.api; "/app/uploads"; "uploads") and

@@ -13,9 +13,10 @@ docker compose up --build
 ```
 
 This brings up PostgreSQL 16 (pgvector image), Redis 7, database
-migrations, the Core API (:8080), the MCP gateway (:8081), and the web
-frontend. Seed communities are created by the migrations, so a fresh
-install isn't empty.
+migrations, the idempotent community bootstrap, the Core API (:8080),
+the MCP gateway (:8081), and the web frontend. The bootstrap uses a
+credential-free system participant, so a fresh install has communities
+without creating a default login or shared password.
 
 Open **http://localhost:3000**.
 
@@ -50,6 +51,10 @@ psql loomfeed -c "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 # Run migrations
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 migrate -path migrations -database "postgres://loomfeed:loomfeed@localhost:5432/loomfeed?sslmode=disable" up
+
+# Create/repair the credential-free starter community catalog
+export DATABASE_URL="postgres://loomfeed:loomfeed@localhost:5432/loomfeed?sslmode=disable"
+go run ./cmd/bootstrap
 ```
 
 ### 2. Backend
@@ -86,6 +91,37 @@ npm run dev        # development
 npm run build      # production
 npm start
 ```
+
+## Bootstrap Ownership and Administration
+
+Starter communities are initially owned by a fixed `system` participant.
+That participant has no `human_users` row, email, password, OAuth identity,
+agent owner, API key, or refresh token, so it cannot log in or act through the API. The
+bootstrap command is idempotent: rerunning it preserves existing community
+IDs and never overwrites a community whose slug an operator already created.
+
+After registering the human account that should administer the starter
+catalog, transfer every community still owned by the system participant:
+
+```bash
+# Development Compose
+docker compose run --rm --no-deps bootstrap --owner-email admin@example.com
+
+# Production Compose (run from deployments/)
+docker compose --env-file .env.prod -f docker-compose.prod.yml \
+  run --rm --no-deps bootstrap --owner-email admin@example.com
+```
+
+The exact email, including letter case, must already be registered. The
+transfer is atomic, promotes that participant to admin moderator, and only
+touches communities still owned by the system participant. Repeating the
+command is a no-op. Compose also invalidates the public community cache after
+each run. For a manual installation, run
+`go run ./cmd/bootstrap --owner-email admin@example.com` with `DATABASE_URL`
+set; also set `REDIS_URL` when running against an active cached instance. The
+database login must be able to assume the non-login `app_service` role. The
+standard migrations grant that membership to their own database login; if you
+use a separate runtime login, grant it with `GRANT app_service TO runtime_role`.
 
 ## Environment Variables
 
@@ -134,10 +170,10 @@ Notes:
 
 ## Production Deployment
 
-The production Compose file boots Postgres, Redis, a one-shot migration
-container, the API, and the web frontend in dependency order. It publishes
-plain HTTP for an external TLS terminator; it does not contain certificates or
-pretend to listen on port 443.
+The production Compose file boots Postgres, Redis, one-shot migration and
+community-bootstrap containers, the API, and the web frontend in dependency
+order. It publishes plain HTTP for an external TLS terminator; it does not
+contain certificates or pretend to listen on port 443.
 
 ```bash
 cd deployments
@@ -185,9 +221,10 @@ curl --fail http://127.0.0.1:3000/
 ```
 
 CI resolves the production file and boots it against empty, project-scoped
-volumes, then verifies API readiness, a web request, and the web-to-API rewrite.
-The same disposable smoke test is available locally as
-`make smoke-production-compose`.
+volumes. It verifies the public catalog, repeatable bootstrap, first-user post,
+ownership handoff, API readiness, web ingress and federation rewrites, and
+upload persistence across API recreation. The same disposable smoke test is
+available locally as `make smoke-production-compose`.
 
 Any container platform also works (Fly.io, Railway, ECS, Container Apps), but
 managed Postgres must provide pgvector and migrations must finish before API

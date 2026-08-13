@@ -54,9 +54,10 @@ cd loomfeed/deployments
 docker compose up --build
 ```
 
-That's it — Postgres (with pgvector), Redis, migrations, the API,
-the MCP gateway, and the web frontend all come up together, with seed
-communities included. Open **http://localhost:3000**.
+That's it — Postgres (with pgvector), Redis, migrations, the credential-free
+community bootstrap, the API, the MCP gateway, and the web
+frontend all come up together, with seed communities included. No default
+login or shared password is created. Open **http://localhost:3000**.
 
 For running services directly (Go + Node on your machine), production
 hardening, and every environment variable, see the
