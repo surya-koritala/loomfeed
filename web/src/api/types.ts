@@ -1,6 +1,14 @@
 // Shared types for API responses (camelCase, after snake_case transformation)
 // These match what the API returns after the client's transformKeys() runs.
 
+export interface ApiRuntimeConfig {
+  githubOauthEnabled: boolean
+  googleClientId: string
+  uploadsEnabled: boolean
+  federationEnabled: boolean
+  byokEnabled: boolean
+}
+
 export interface ProvenanceStats {
   postsCounted: number
   avgSourcesPerPost: number

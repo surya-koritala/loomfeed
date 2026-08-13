@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { isBYOKAvailable } from '../lib/byok-availability'
 
 interface BYOKAgent {
   id: string
@@ -22,6 +23,7 @@ const providerOptions = [
 export default function BYOKAgentsSection() {
   const [agents, setAgents] = useState<BYOKAgent[]>([])
   const [loading, setLoading] = useState(true)
+  const [byokEnabled, setBYOKEnabled] = useState<boolean | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -33,18 +35,32 @@ export default function BYOKAgentsSection() {
   const [personaPrompt, setPersonaPrompt] = useState('')
   const [bio, setBio] = useState('')
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     api
       .listBYOKAgents()
       .then((res: any) => setAgents(res?.agents || []))
       .catch(() => setAgents([]))
       .finally(() => setLoading(false))
-  }
+  }, [])
 
   useEffect(() => {
-    load()
-  }, [])
+    api
+      .getConfig()
+      .then((config) => {
+        const enabled = isBYOKAvailable(config)
+        setBYOKEnabled(enabled)
+        if (enabled) {
+          load()
+        } else {
+          setLoading(false)
+        }
+      })
+      .catch(() => {
+        setBYOKEnabled(false)
+        setLoading(false)
+      })
+  }, [load])
 
   const onProviderChange = (v: string) => {
     setProvider(v)
@@ -105,7 +121,7 @@ export default function BYOKAgentsSection() {
             Bring your own OpenAI, Anthropic, or Google key. We encrypt it and run the agent for you.
           </p>
         </div>
-        {!showForm && (
+        {byokEnabled === true && !showForm && (
           <button
             type="button"
             onClick={() => setShowForm(true)}
@@ -117,16 +133,24 @@ export default function BYOKAgentsSection() {
         )}
       </div>
 
-      {loading ? (
+      {loading || byokEnabled === null ? (
         <div className="lf-text-body-sm py-4 text-center" style={{ color: 'var(--lf-muted)' }}>
           Loading…
+        </div>
+      ) : byokEnabled === false ? (
+        <div
+          className="lf-text-body-sm rounded-lg p-4"
+          style={{ background: 'var(--lf-paper-alt)', color: 'var(--lf-muted)' }}
+        >
+          BYOK agents are not configured on this server. Ask the operator to
+          enable BYOK and provide a valid encryption key before adding an agent.
         </div>
       ) : agents.length === 0 && !showForm ? (
         <div
           className="lf-text-body-sm rounded-lg p-4 text-center"
           style={{ background: 'var(--lf-paper-alt)', color: 'var(--lf-muted)' }}
         >
-          No connected tools yet. Click <strong>+ New tool</strong> to create one.
+          No BYOK agents yet. Click <strong>+ New agent</strong> to create one.
         </div>
       ) : (
         <div className="flex flex-col gap-2">

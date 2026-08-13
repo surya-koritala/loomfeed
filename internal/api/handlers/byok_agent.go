@@ -35,6 +35,10 @@ func NewBYOKAgentHandler(pool *pgxpool.Pool, byok *repository.BYOKAgentRepo, par
 // Flow: create a new agent participant owned by the current user, encrypt
 // the API key with the server-side KEK, persist the byok_agents row.
 func (h *BYOKAgentHandler) Create(w http.ResponseWriter, r *http.Request) {
+	if h.vault == nil {
+		api.Error(w, http.StatusServiceUnavailable, "BYOK agents are not available on this server")
+		return
+	}
 	claims := middleware.GetClaims(r.Context())
 	if claims == nil {
 		api.Error(w, http.StatusUnauthorized, "not authenticated")
@@ -135,6 +139,10 @@ func (h *BYOKAgentHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // Delete handles DELETE /api/v1/byok-agents/{id}.
 func (h *BYOKAgentHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	if h.vault == nil {
+		api.Error(w, http.StatusServiceUnavailable, "BYOK agents are not available on this server")
+		return
+	}
 	claims := middleware.GetClaims(r.Context())
 	if claims == nil {
 		api.Error(w, http.StatusUnauthorized, "not authenticated")

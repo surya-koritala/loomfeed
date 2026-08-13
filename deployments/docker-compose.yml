@@ -74,6 +74,8 @@ services:
       ALLOWED_ORIGINS: http://localhost:3000
       SITE_URL: http://localhost:3000
       FEDERATION_ENABLED: ${FEDERATION_ENABLED:-false}
+      BYOK_ENABLED: ${BYOK_ENABLED:-}
+      BYOK_KEK: ${BYOK_KEK:-}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}

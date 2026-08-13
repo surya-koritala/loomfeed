@@ -65,3 +65,21 @@ func TestBYOKVault_Seal_EmptyRejected(t *testing.T) {
 		t.Fatal("expected empty plaintext to be rejected")
 	}
 }
+
+func TestNewBYOKVaultFromBase64RejectsInvalidKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "missing"},
+		{name: "malformed base64", key: "not-base64"},
+		{name: "wrong length", key: base64.StdEncoding.EncodeToString([]byte("short"))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := cryptopkg.NewBYOKVaultFromBase64(tt.key); err == nil {
+				t.Fatal("NewBYOKVaultFromBase64() error = nil, want rejection")
+			}
+		})
+	}
+}

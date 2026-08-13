@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/mail"
 	"os"
@@ -30,12 +31,24 @@ type Config struct {
 	Sports         SportsConfig
 	Auth           AuthConfig
 	Federation     FederationConfig
+	BYOK           BYOKConfig
 	// LoomDeployment names the Azure OpenAI deployment used by the
 	// @loom AI summon path specifically. Defaults to gpt-5.4-mini
 	// (cheap, fast — right tier for short summaries). Falls back to
 	// LLM.DeploymentName if unset, so a dev box configured for just
 	// one deployment doesn't need a second env var to enable Loom.
 	LoomDeployment string
+}
+
+// BYOKConfig controls bring-your-own-key agents. Enabled is the operator's
+// effective intent: a configured key enables the feature for backwards
+// compatibility unless BYOK_ENABLED is explicitly false. ExplicitlyEnabled
+// records BYOK_ENABLED=true so startup validation can fail fast instead of
+// silently disabling a feature the operator requested.
+type BYOKConfig struct {
+	Enabled           bool
+	ExplicitlyEnabled bool
+	KEK               string
 }
 
 // AuthConfig gates the cookie-auth migration. Phase 1.2 dual-issues
@@ -176,6 +189,16 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid FEDERATION_ENABLED: %w", err)
 	}
+	byokKEK := strings.TrimSpace(os.Getenv("BYOK_KEK"))
+	byokEnabled := byokKEK != ""
+	byokExplicitlyEnabled := false
+	if raw := strings.TrimSpace(os.Getenv("BYOK_ENABLED")); raw != "" {
+		byokEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BYOK_ENABLED: %w", err)
+		}
+		byokExplicitlyEnabled = byokEnabled
+	}
 
 	return &Config{
 		Environment: getEnv("ENVIRONMENT", "development"),
@@ -244,6 +267,11 @@ func Load() (*Config, error) {
 			CookieIssuance: getEnv("AUTH_COOKIE_ISSUANCE", "true") != "false",
 		},
 		Federation: FederationConfig{Enabled: federationEnabled},
+		BYOK: BYOKConfig{
+			Enabled:           byokEnabled,
+			ExplicitlyEnabled: byokExplicitlyEnabled,
+			KEK:               byokKEK,
+		},
 		Uploads: UploadsConfig{
 			Enabled: getEnv("UPLOADS_ENABLED", "") == "true",
 			ContentSafety: ContentSafetyConfig{
@@ -262,6 +290,11 @@ func (c *Config) Validate() error {
 	if c.DB.URL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
+	if c.BYOK.ExplicitlyEnabled {
+		if err := validateBYOKKEK(c.BYOK.KEK); err != nil {
+			return err
+		}
+	}
 	if c.Email.SMTPHost != "" {
 		if c.Email.SMTPFrom == "" {
 			return fmt.Errorf("SMTP_FROM is required when SMTP_HOST is set")
@@ -278,6 +311,20 @@ func (c *Config) Validate() error {
 		}
 	} else if c.Email.SMTPUsername != "" || c.Email.SMTPPassword != "" || c.Email.SMTPFrom != "" {
 		return fmt.Errorf("SMTP_HOST is required when SMTP credentials or SMTP_FROM are set")
+	}
+	return nil
+}
+
+func validateBYOKKEK(encoded string) error {
+	if encoded == "" {
+		return fmt.Errorf("BYOK_KEK is required when BYOK_ENABLED=true")
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return fmt.Errorf("BYOK_KEK must be valid base64: %w", err)
+	}
+	if len(key) != 32 {
+		return fmt.Errorf("BYOK_KEK must decode to 32 bytes, got %d", len(key))
 	}
 	return nil
 }

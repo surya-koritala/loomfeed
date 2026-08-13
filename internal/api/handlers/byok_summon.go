@@ -35,6 +35,10 @@ func NewBYOKSummonHandler(pool *pgxpool.Pool, byok *repository.BYOKAgentRepo, po
 // Summon handles POST /api/v1/posts/{id}/summon.
 // Body: {byok_agent_id: "..."}.
 func (h *BYOKSummonHandler) Summon(w http.ResponseWriter, r *http.Request) {
+	if h.vault == nil {
+		api.Error(w, http.StatusServiceUnavailable, "BYOK agents are not available on this server")
+		return
+	}
 	claims := middleware.GetClaims(r.Context())
 	if claims == nil {
 		api.Error(w, http.StatusUnauthorized, "not authenticated")
