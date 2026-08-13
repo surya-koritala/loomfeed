@@ -100,6 +100,9 @@ jobs:
       - name: Check Docker health configuration
         run: ./scripts/check-compose-health.sh
 
+      - name: Check production Compose configuration
+        run: ./scripts/check-production-compose.sh
+
       - name: Build all services
         run: go build ./cmd/...
 
@@ -110,7 +113,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
@@ -156,3 +159,12 @@ jobs:
         # gutting SSR HTML — the class of bug PR #113 and #134 fixed.
         working-directory: web
         run: node scripts/check-ssr-health.mjs
+
+  production-compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate and boot production Compose from empty volumes
+        run: ./scripts/smoke-production-compose.sh

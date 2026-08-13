@@ -18,7 +18,11 @@ RUN apk add --no-cache ca-certificates tzdata wget
 
 COPY --from=builder /bin/service /usr/local/bin/service
 
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+WORKDIR /app
+RUN addgroup -S appgroup && \
+    adduser -S appuser -G appgroup && \
+    mkdir -p /app/uploads && \
+    chown appuser:appgroup /app/uploads
 USER appuser
 EXPOSE 8080
 
