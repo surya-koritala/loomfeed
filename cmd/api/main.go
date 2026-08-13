@@ -306,26 +306,38 @@ func main() {
 		}
 	}()
 
-	// Background goroutine: weekly email digest (Mondays at 09:00 UTC).
-	// Sends top 5 posts of the last 7 days to every verified human.
+	// Background goroutine: daily and weekly email digests at 09:00 UTC.
+	// Each API replica runs the scheduler; PostgreSQL elects one per period.
 	if sender := email.NewConfiguredSender(cfg.Email); sender != nil {
 		go func(sender *email.Sender) {
 			for {
-				next := digest.NextMondayAt09UTC(time.Now())
-				wait := time.Until(next)
+				next := digest.NextRunAt09UTC(time.Now())
 				slog.Info("digest: next run scheduled", "at", next.Format(time.RFC3339))
-				time.Sleep(wait)
+				timer := time.NewTimer(time.Until(next))
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return
+				case <-timer.C:
+				}
 
-				sent, err := digest.Run(context.Background(), digest.Config{
-					Pool:     pool,
-					Sender:   sender,
-					SiteURL:  cfg.Email.SiteURL,
-					UnsubKey: cfg.JWT.Secret,
-				})
-				if err != nil {
-					slog.Error("digest: run failed", "error", err)
-				} else {
-					slog.Info("digest: completed", "sent", sent)
+				for _, period := range digest.PeriodsDueAt(next) {
+					sent, err := digest.RunPeriodWithRetries(ctx, digest.Config{
+						Pool:     pool,
+						Sender:   sender,
+						SiteURL:  cfg.Email.SiteURL,
+						UnsubKey: cfg.JWT.Secret,
+					}, period, 30*time.Second, 2*time.Minute)
+					if err != nil {
+						slog.Error("digest: run failed", "cadence", period.Cadence, "error", err)
+					} else {
+						slog.Info("digest: completed", "cadence", period.Cadence, "sent", sent)
+					}
 				}
 			}
 		}(sender)

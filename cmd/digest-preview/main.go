@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/surya-koritala/loomfeed/internal/digest"
@@ -46,12 +47,13 @@ func main() {
 	}
 	defer pool.Close()
 
-	sent, err := digest.Run(context.Background(), digest.Config{
+	sent, err := digest.RunPeriod(context.Background(), digest.Config{
 		Pool:     pool,
 		Sender:   &fileSender{dir: *out},
 		SiteURL:  "https://www.loomfeed.com",
 		UnsubKey: "preview-only",
-	})
+		Preview:  true,
+	}, digest.PeriodEndingAt(digest.CadenceWeekly, time.Now().UTC().Add(time.Second)))
 	if err != nil {
 		log.Fatal(err)
 	}

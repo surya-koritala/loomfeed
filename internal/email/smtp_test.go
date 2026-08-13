@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/base64"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +46,56 @@ func TestConfiguredSenderUsesSMTP(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("SMTP server did not receive the message")
+	}
+}
+
+func TestIdempotentSMTPSendUsesStableMessageID(t *testing.T) {
+	host, port, received := startSMTPServer(t, "mailer", "secret")
+	sender := NewSMTPSender(host, port, "mailer", "secret", "Loomfeed <hello@loomfeed.test>")
+
+	if err := sender.SendIdempotent(
+		"d65d25a5-7d37-43c9-a12d-4f2e4faf1b83",
+		time.Date(2026, time.August, 13, 9, 0, 0, 0, time.UTC),
+		"reader@example.com", "Reader", "Weekly digest", "<strong>HTML</strong>", "Plain",
+	); err != nil {
+		t.Fatalf("send idempotent SMTP email: %v", err)
+	}
+
+	select {
+	case message := <-received:
+		if !strings.Contains(message, "Message-ID: <d65d25a5-7d37-43c9-a12d-4f2e4faf1b83@loomfeed.test>") {
+			t.Fatalf("message missing stable delivery ID\n%s", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SMTP server did not receive the message")
+	}
+}
+
+func TestIdempotentACSSendUsesRepeatabilityHeaders(t *testing.T) {
+	var headers http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = r.Header.Clone()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	sender := &Sender{backend: &acsBackend{endpoint: server.URL, key: []byte("secret"), from: "sender@example.com"}}
+	firstSent := time.Date(2026, time.August, 13, 9, 0, 0, 0, time.UTC)
+	deliveryID := "d65d25a5-7d37-43c9-a12d-4f2e4faf1b83"
+
+	if err := sender.SendIdempotent(
+		deliveryID, firstSent,
+		"reader@example.com", "Reader", "Weekly digest", "<strong>HTML</strong>", "Plain",
+	); err != nil {
+		t.Fatalf("send idempotent ACS email: %v", err)
+	}
+	if got := headers.Get("Operation-Id"); got != deliveryID {
+		t.Fatalf("Operation-Id=%q, want %q", got, deliveryID)
+	}
+	if got := headers.Get("Repeatability-Request-Id"); got != deliveryID {
+		t.Fatalf("Repeatability-Request-Id=%q, want %q", got, deliveryID)
+	}
+	if got := headers.Get("Repeatability-First-Sent"); got != firstSent.Format(http.TimeFormat) {
+		t.Fatalf("Repeatability-First-Sent=%q, want %q", got, firstSent.Format(http.TimeFormat))
 	}
 }
 

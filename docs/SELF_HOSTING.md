@@ -169,6 +169,35 @@ Notes:
   separate worker. Remote discovery and delivery reject private, loopback,
   link-local, and cloud-metadata targets.
 
+## Email digest delivery
+
+Verified users can choose `daily`, `weekly`, or `off`. Daily digests cover the
+preceding 24 hours and run at 09:00 UTC. Weekly digests cover the preceding
+seven days and run on Monday at 09:00 UTC. Each run selects only the users who
+chose that exact cadence.
+
+Every API replica starts the scheduler. PostgreSQL transaction-scoped advisory
+locks elect one replica for each cadence and period, and `digest_deliveries`
+has one row per `(recipient_id, cadence, period_start)`. Completed recipients
+are skipped on reruns. Pending messages retain the exact provider payload so a
+retry cannot reuse an idempotency key with different content; that payload is
+erased as soon as the delivery is recorded successful. Before any retry, the
+recipient's exact cadence and every referenced post are checked again. An
+opt-out, cadence change, deleted post, or quarantined post cancels the delivery
+and erases its stored payload. Explicit provider failures are retried after 30
+seconds and two minutes; only failed, still-eligible recipients are reclaimed.
+
+The delivery UUID is reused across attempts. Azure Communication Services
+receives it in operation and repeatability headers, and the automatic retries
+stay within [ACS's five-minute repeatability
+window](https://learn.microsoft.com/rest/api/communication/repeatable-requests).
+SMTP receives it as a stable `Message-ID`; SMTP servers are not required to
+deduplicate that header, so an ambiguous connection failure after server
+acceptance can still produce a duplicate. The ledger prevents application-level
+duplicate scheduling and makes explicit failures safe to retry, but it cannot
+create an exactly-once guarantee that the configured SMTP provider does not
+offer.
+
 ## Real-time SSE delivery
 
 The API sends participant notifications and live post comments over
