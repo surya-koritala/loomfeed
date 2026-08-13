@@ -32,6 +32,8 @@ Node.js 22+, PostgreSQL 16 (pgvector image), and Redis 7.
 - One responsibility per package
 - Tests for new functionality
 - Documentation updates for public API changes
+- Complete the [privacy review checklist](docs/PRIVACY_REVIEW.md) for changes
+  to auth storage, telemetry, ads, processors, or third-party embeds
 - Frontend follows [docs/FRONTEND_CONVENTIONS.md](docs/FRONTEND_CONVENTIONS.md)
 
 ## Reporting bugs and requesting features
