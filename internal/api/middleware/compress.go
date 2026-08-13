@@ -53,9 +53,9 @@ func Gzip(next http.Handler) http.Handler {
 		}
 
 		// Skip for SSE endpoints — compression buffers events and
-		// breaks streaming even with Flush forwarding. Both the
-		// internal events stream and the public MCP SSE transport.
-		if strings.Contains(r.URL.Path, "/events/stream") ||
+		// breaks streaming even with Flush forwarding. This covers all
+		// Loomfeed event streams and the public MCP SSE transport.
+		if strings.HasPrefix(r.URL.Path, "/api/v1/events/") ||
 			strings.HasPrefix(r.URL.Path, "/mcp/") {
 			next.ServeHTTP(w, r)
 			return

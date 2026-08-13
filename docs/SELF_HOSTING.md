@@ -132,7 +132,7 @@ ones that matter most:
 |----------|----------|---------|-------------|
 | `JWT_SECRET` | **Yes** | — | JWT signing key. The API refuses to boot without it. Generate with `openssl rand -base64 48`. |
 | `DATABASE_URL` | No | localhost dev DSN | PostgreSQL connection string. Set explicitly in production. |
-| `REDIS_URL` | No | `redis://localhost:6379` | Caching, rate limiting, SSE events. Unreachable Redis logs a warning and continues. |
+| `REDIS_URL` | No | `redis://localhost:6379` | Caching, rate limiting, and cross-replica SSE Pub/Sub. Unreachable Redis logs a warning and continues with process-local SSE. |
 | `API_PORT` | No | `8080` | Core API port. |
 | `GATEWAY_PORT` | No | `8081` | MCP gateway port. |
 | `CORE_API_URL` | No | `http://localhost:$API_PORT` | How the gateway reaches the Core API. Set when they run in separate containers. |
@@ -168,6 +168,27 @@ Notes:
   proxy routing are ready. Federation runs in the Core API; there is no
   separate worker. Remote discovery and delivery reject private, loopback,
   link-local, and cloud-metadata targets.
+
+## Real-time SSE delivery
+
+The API sends participant notifications and live post comments over
+Server-Sent Events. Streams clear the normal HTTP write deadline and send a
+heartbeat comment every 15 seconds so long-lived connections remain active
+through idle proxies.
+
+With a healthy `REDIS_URL`, each API replica publishes events through Redis
+Pub/Sub and every replica forwards matching events to its local SSE clients.
+Without Redis, the API stays available but delivery is process-local: an event
+created on one replica cannot reach a stream attached to another replica.
+
+SSE delivery is intentionally at-most-once and has no replay log. Each local
+subscriber has a 16-event buffer; if that client is slower than producers, the
+new event is dropped. Each replica also has a bounded 256-event Redis publish
+queue; when it is full or Redis is unavailable, local delivery is still
+attempted but cross-replica fan-out can be lost. Redis Pub/Sub does not provide
+a global event ordering guarantee across publishers. Clients should reconnect
+and refresh canonical state through the REST endpoints after any disconnect or
+sequence gap.
 
 ## Production Deployment
 

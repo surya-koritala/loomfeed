@@ -78,9 +78,11 @@ func main() {
 		// Test connection
 		if err := redisClient.Ping(ctx).Err(); err != nil {
 			slog.Warn("redis ping failed, disabling", "error", err)
+			_ = redisClient.Close()
 			redisClient = nil
 		} else {
 			slog.Info("redis connected")
+			defer redisClient.Close()
 		}
 	}
 
@@ -116,6 +118,16 @@ func main() {
 	mux.Handle("GET /metrics", metrics.GuardedHandler(os.Getenv("METRICS_TOKEN")))
 
 	hub := events.NewHub()
+	if redisClient != nil {
+		sharedHub, err := events.NewRedisHub(ctx, redisClient)
+		if err != nil {
+			slog.Warn("Redis SSE event bus unavailable; using process-local delivery", "error", err)
+		} else {
+			hub = sharedHub
+			slog.Info("Redis SSE event bus connected")
+		}
+	}
+	defer hub.Close()
 	routes.Register(mux, pool, cfg, redisCache, hub)
 
 	// metrics.Middleware is innermost (closest to the mux) so the

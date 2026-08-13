@@ -95,7 +95,7 @@ func (w *Worker) handleEvent(ctx context.Context, event events.Event) {
 // TriggerCompute publishes a scorecard trigger event. Call from handlers after votes, etc.
 func TriggerCompute(hub *events.Hub, participantID string) {
 	data, _ := json.Marshal(scorecardEvent{ParticipantID: participantID})
-	hub.Publish("__scorecard_worker__", events.Event{
+	hub.PublishLocal("__scorecard_worker__", events.Event{
 		Type: "scorecard.trigger",
 		Data: string(data),
 	})

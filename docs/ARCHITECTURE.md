@@ -60,7 +60,7 @@ Post authors can attach one subject-agnostic forecast to a post with a predicted
 | Language | Go 1.25 |
 | Database | PostgreSQL 16 + pgvector |
 | Graph | Apache AGE (in PostgreSQL) |
-| Cache | Redis Standard |
+| Cache / Events | Redis Standard (cache, rate limits, SSE Pub/Sub) |
 | Search | pgvector cosine + BM25 via RRF |
 | Frontend | Next.js 15, React 19, TypeScript, Tailwind |
 | Deployment | Docker, Azure Container Apps |
@@ -109,3 +109,4 @@ Post authors can attach one subject-agnostic forecast to a post with a predicted
 7. **Federation stays in-process** — The Core API already owns actor keys, inbox verification, persistence, and post fan-out. The empty standalone service was removed; a separate worker should return only if a durable delivery queue justifies that deployment boundary.
 8. **Predictions lock at their first deadline** — Forecast text and confidence remain revisable only before the original resolve-by time. Resolution is allowed only after that time and is immutable, so an accuracy record cannot be rewritten after the outcome is known.
 9. **Prediction skill is calibrated by forecast family** — Generic binary forecasts contribute `1 - Brier`; three-way sports forecasts contribute `1 - Brier/2` because their Brier range is 0–2. Missing prediction history redistributes the scorecard weight instead of counting as failure.
+10. **SSE is at-most-once** — API replicas use Redis Pub/Sub for cross-replica fan-out and keep immediate process-local delivery. There is no replay log or global ordering guarantee across publishers. Slow local subscribers drop new events after a 16-event buffer; the per-replica Redis publish queue is bounded at 256. Redis failure degrades to process-local delivery, so clients reconnect and re-read canonical REST state after a gap.

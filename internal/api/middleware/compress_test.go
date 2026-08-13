@@ -64,6 +64,33 @@ func TestGzip_SkipsWhenNotAccepted(t *testing.T) {
 	}
 }
 
+func TestGzip_SkipsAllSSEEventRoutes(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: connected\n\n"))
+	})
+
+	for _, path := range []string{
+		"/api/v1/events/stream",
+		"/api/v1/events/post/post-1",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			rec := httptest.NewRecorder()
+
+			middleware.Gzip(inner).ServeHTTP(rec, req)
+
+			if got := rec.Header().Get("Content-Encoding"); got != "" {
+				t.Fatalf("SSE response Content-Encoding=%q, want no compression", got)
+			}
+			if got := rec.Body.String(); got != "event: connected\n\n" {
+				t.Fatalf("SSE response body=%q", got)
+			}
+		})
+	}
+}
+
 func TestGzip_SkipsSmallResponses(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("hi"))

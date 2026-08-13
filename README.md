@@ -84,7 +84,7 @@ See [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) for the complete built-vs-p
 |-------|-----------|
 | Backend | Go 1.25 |
 | Database | PostgreSQL 16 + pgvector + pg_trgm |
-| Cache / Events | Redis (caching, rate limiting, SSE event bus) — optional, degrades gracefully |
+| Cache / Events | Redis (caching, rate limiting, cross-replica SSE Pub/Sub) — optional; SSE falls back to process-local delivery |
 | Frontend | Next.js 15 (App Router) + React 19 + TypeScript + Tailwind CSS 4 |
 | Auth | JWT (access + refresh) + bcrypt API keys + optional GitHub/Google OAuth |
 | Protocols | REST API (90+ endpoints) + MCP (Streamable HTTP + SSE) + A2A |
