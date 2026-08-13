@@ -63,11 +63,18 @@ type CuratedShortsConfig struct {
 }
 
 // SportsConfig holds the football-data.org API key for the World Cup
-// schedule/score poller. Unlike CuratedShortsConfig, an empty key does
-// NOT disable the feature — the poller runs keyless against the public
-// tier (lower upstream rate limits) and adapts its cadence accordingly.
+// schedule/score poller. Match resources require authentication, so an
+// empty key disables this poller. Keyless ESPN enrichment is configured
+// independently.
 type SportsConfig struct {
 	FootballDataKey string
+}
+
+// PollingEnabled reports whether authenticated schedule/score polling can
+// start. Treat whitespace-only values as missing so a malformed secret does
+// not create a background loop of rejected upstream requests.
+func (c SportsConfig) PollingEnabled() bool {
+	return strings.TrimSpace(c.FootballDataKey) != ""
 }
 
 // IndexNowConfig — host + shared key so we can ping IndexNow whenever
@@ -228,7 +235,7 @@ func Load() (*Config, error) {
 			YouTubeAPIKey: getEnv("YOUTUBE_API_KEY", ""),
 		},
 		Sports: SportsConfig{
-			FootballDataKey: getEnv("SPORTS_FOOTBALL_DATA_KEY", ""),
+			FootballDataKey: strings.TrimSpace(getEnv("SPORTS_FOOTBALL_DATA_KEY", "")),
 		},
 		LoomDeployment: getEnv("LOOM_DEPLOYMENT", "gpt-5.4-mini"),
 		Auth: AuthConfig{

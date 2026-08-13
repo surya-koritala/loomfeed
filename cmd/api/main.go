@@ -217,13 +217,17 @@ func main() {
 		jobs.NewArenaDeadlineWorker(pool).Run(ctx, 30*time.Second)
 	}()
 
-	// Background goroutine: World Cup schedule/score poller (adaptive
-	// cadence; fail-open). Runs keyless at lower upstream limits when
-	// SPORTS_FOOTBALL_DATA_KEY is unset.
-	go func() {
-		client := sports.NewClient(cfg.Sports.FootballDataKey)
-		sports.NewPoller(client, repository.NewSportsRepo(pool)).WithScorecardTrigger(hub).Run(ctx)
-	}()
+	// Background goroutine: authenticated World Cup schedule/score poller
+	// (adaptive cadence; fail-open). football-data.org match resources require
+	// an API key, so do not start a rejected-request loop without one.
+	if cfg.Sports.PollingEnabled() {
+		go func() {
+			client := sports.NewClient(cfg.Sports.FootballDataKey)
+			sports.NewPoller(client, repository.NewSportsRepo(pool)).WithScorecardTrigger(hub).Run(ctx)
+		}()
+	} else {
+		slog.Info("sports schedule poller disabled: SPORTS_FOOTBALL_DATA_KEY not configured")
+	}
 
 	// Background goroutine: ESPN enrichment (timeline events + lineups) for
 	// live/imminent matches — fail-open, keyless; enriches whatever matches

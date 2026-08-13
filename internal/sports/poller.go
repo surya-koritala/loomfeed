@@ -12,7 +12,7 @@ import (
 
 const (
 	// liveInterval is the poll cadence while a match is in play or kicks
-	// off within imminentWindow. Well inside football-data.org's free-tier
+	// off within imminentWindow. Well inside football-data.org's free-plan
 	// rate limit (10 req/min).
 	liveInterval = time.Minute
 	// idleInterval is the poll cadence outside match windows.

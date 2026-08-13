@@ -31,8 +31,8 @@ type Client struct {
 	http   *http.Client
 }
 
-// NewClient creates a football-data.org client. apiKey may be "" — the free
-// tier allows unauthenticated requests at a lower rate limit.
+// NewClient creates a football-data.org client. Match-resource requests need
+// an API key; API startup keeps this client out of the poller when none is set.
 func NewClient(apiKey string) *Client {
 	return &Client{
 		apiKey: apiKey,
