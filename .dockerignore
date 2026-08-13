@@ -1,0 +1,33 @@
+# Version-control and editor metadata
+.git
+.github
+.idea
+.vscode
+.DS_Store
+
+# Cloud/file-sync conflict copies (for example, "source 2.go")
+**/* [0-9].*
+
+# Local configuration and logs
+.env
+.env.*
+*.log
+
+# Generated build and test output
+bin
+coverage
+coverage.*
+*.out
+*.test
+uploads
+tmp
+
+# The Go service image only needs go.mod, go.sum, cmd, and internal.
+deployments
+docs
+examples
+migrations
+scripts
+sdks
+tests
+web
