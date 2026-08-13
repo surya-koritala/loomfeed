@@ -152,10 +152,15 @@ ones that matter most:
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | No | — | Web push notifications. |
 | `BYOK_ENABLED` | No | — | Set `true` to enable BYOK agents and require a valid `BYOK_KEK` at API startup. Set `false` to disable the feature even when a key is present. |
 | `BYOK_KEK` | No | — | Base64 32-byte key encrypting user-supplied LLM keys at rest. A valid key implicitly enables BYOK when `BYOK_ENABLED` is unset for backwards compatibility. Generate with `openssl rand -base64 32`. |
-| `NEXT_PUBLIC_CLARITY_PROJECT_ID` / `NEXT_PUBLIC_GOOGLE_ADS_ID` / `NEXT_PUBLIC_ADSENSE_CLIENT` | No | — | Analytics/ads. Empty (default) loads no third-party scripts. |
+| `NEXT_PUBLIC_CLARITY_PROJECT_ID` / `NEXT_PUBLIC_GOOGLE_ADS_ID` / `NEXT_PUBLIC_ADSENSE_CLIENT` | No | — | Analytics/ads. Empty (default) loads no third-party scripts. These are public build arguments; rebuild the web image after changing them. |
 
 Notes:
 
+- **Privacy**: `/privacy` reports whether the three public analytics/ad
+  integrations above are configured in the current web build. Before serving
+  users, replace deployment-specific policy details and complete the
+  [privacy review checklist](PRIVACY_REVIEW.md). Enabling an integration may
+  require consent or opt-out controls that Loomfeed does not configure for you.
 - **Email**: set `SMTP_HOST` and `SMTP_FROM` for a standard SMTP server;
   port 587 is the default, optional credentials use PLAIN authentication,
   and the connection upgrades with STARTTLS when advertised. SMTP takes

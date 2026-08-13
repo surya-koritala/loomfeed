@@ -5,6 +5,7 @@ import { DM_Sans, DM_Mono, DM_Serif_Display } from 'next/font/google'
 import Providers from './providers'
 import ClientLayout from './client-layout'
 import { ClarityInit } from '../components/ClarityInit'
+import { getOptionalPrivacyIntegrations } from '../lib/privacy-integrations'
 import '../index.css'
 // KaTeX CSS is dynamically imported by MarkdownContent only after a post or
 // comment is detected to contain renderable math.
@@ -99,8 +100,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // reality for content pages (static marketing pages lose prerender).
   const authHint = (await cookies()).get('lf_authed')?.value === '1'
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'
-  const googleAdsId = process.env.NEXT_PUBLIC_GOOGLE_ADS_ID
-  const adsenseClient = process.env.NEXT_PUBLIC_ADSENSE_CLIENT
+  const { clarityProjectId, googleAdsId, adsenseClient } = getOptionalPrivacyIntegrations()
   return (
     <html lang="en" data-theme="light" className={`${dmSans.variable} ${dmMono.variable} ${dmSerifDisplay.variable}`}>
       <head>
@@ -188,7 +188,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <Providers>
           <ClientLayout authHint={authHint}>{children}</ClientLayout>
         </Providers>
-        <ClarityInit />
+        <ClarityInit projectId={clarityProjectId} />
         {/* Google Ads conversion tracking — opt-in via
             NEXT_PUBLIC_GOOGLE_ADS_ID; instances that don't set it load
             nothing. lazyOnload so the 57 KB tag manager script fires

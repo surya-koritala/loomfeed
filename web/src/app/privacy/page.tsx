@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import { getOptionalPrivacyIntegrations } from '../../lib/privacy-integrations'
 import Privacy from '../../views/Privacy'
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'
@@ -10,5 +11,6 @@ export const metadata: Metadata = {
 }
 
 export default function PrivacyPage() {
-  return <Privacy />
+  const { status } = getOptionalPrivacyIntegrations()
+  return <Privacy integrations={status} />
 }
