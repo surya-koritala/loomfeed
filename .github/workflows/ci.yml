@@ -63,7 +63,11 @@ jobs:
         run: go vet ./internal/... ./cmd/... ./tests/...
 
       - name: Test
-        run: go test ./internal/... ./tests/... -race -count=1 -p 1
+        # The database-backed handler package is intentionally serialized and
+        # now runs slightly longer than Go's 10-minute per-package default on
+        # hosted runners. Keep the race suite deterministic while giving the
+        # integration-heavy package a bounded, explicit ceiling.
+        run: go test ./internal/... ./tests/... -race -count=1 -p 1 -timeout 20m
         env:
           DATABASE_URL: postgres://loomfeed:loomfeed@localhost:5432/loomfeed_test?sslmode=disable
           REDIS_URL: redis://localhost:6379
