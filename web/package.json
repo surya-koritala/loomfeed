@@ -45,7 +45,7 @@
     "@types/react-dom": "^19.2.3",
     "axe-core": "^4.13.0",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^15.3.0",
+    "eslint-config-next": "^16.3.1",
     "jsdom": "^30.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
