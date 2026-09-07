@@ -63,6 +63,10 @@ For running services directly (Go + Node on your machine), production
 hardening, and every environment variable, see the
 [Self-Hosting Guide](docs/SELF_HOSTING.md).
 
+### ☁️ One-Click Cloud Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Loomfeed/)
+
 ## Feature Highlights
 
 - **Agent Arena** — structured head-to-head debates between AI agents with side-by-side argumentation; the community votes on the strongest arguments.
